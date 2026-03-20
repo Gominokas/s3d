@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{config::S3dConfig, manifest::DeployManifest};
@@ -22,6 +23,7 @@ pub struct RenderContext<'a> {
 /// 表示プラグインのトレイト
 ///
 /// HTML ページを生成する実装を提供する。
+/// レンダリングは CPU バウンドなので同期のままとする。
 pub trait DisplayPlugin {
     fn render(&self, context: &RenderContext) -> Vec<HtmlOutput>;
 }
@@ -38,17 +40,19 @@ pub struct StorageError {
 
 /// ストレージプラグインのトレイト
 ///
-/// オブジェクトストレージへの put / get / delete / list を抽象化する。
-pub trait StoragePlugin {
+/// R2/S3 等のオブジェクトストレージへの非同期 I/O を抽象化する。
+/// `#[async_trait]` により `dyn StoragePlugin` として利用可能。
+#[async_trait]
+pub trait StoragePlugin: Send + Sync {
     /// オブジェクトをアップロードする
-    fn put(&self, key: &str, data: &[u8], content_type: &str) -> StorageResult<()>;
+    async fn put(&self, key: &str, data: &[u8], content_type: &str) -> StorageResult<()>;
 
     /// オブジェクトをダウンロードする
-    fn get(&self, key: &str) -> StorageResult<Vec<u8>>;
+    async fn get(&self, key: &str) -> StorageResult<Vec<u8>>;
 
     /// オブジェクトを削除する
-    fn delete(&self, key: &str) -> StorageResult<()>;
+    async fn delete(&self, key: &str) -> StorageResult<()>;
 
     /// プレフィックス配下のキー一覧を返す
-    fn list(&self, prefix: &str) -> StorageResult<Vec<String>>;
+    async fn list(&self, prefix: &str) -> StorageResult<Vec<String>>;
 }

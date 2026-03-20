@@ -176,4 +176,41 @@ mod tests {
         let s = serde_json::to_string(&strategy).expect("failed");
         assert_eq!(s, "\"cdn\"");
     }
+
+    /// StoragePlugin が async fn を持ち、dyn として扱えることを確認する。
+    #[tokio::test]
+    async fn storage_plugin_is_async() {
+        use async_trait::async_trait;
+
+        struct MockStorage;
+
+        #[async_trait]
+        impl StoragePlugin for MockStorage {
+            async fn put(&self, _key: &str, _data: &[u8], _ct: &str) -> StorageResult<()> {
+                Ok(())
+            }
+            async fn get(&self, key: &str) -> StorageResult<Vec<u8>> {
+                Ok(key.as_bytes().to_vec())
+            }
+            async fn delete(&self, _key: &str) -> StorageResult<()> {
+                Ok(())
+            }
+            async fn list(&self, _prefix: &str) -> StorageResult<Vec<String>> {
+                Ok(vec!["a".to_string(), "b".to_string()])
+            }
+        }
+
+        // dyn StoragePlugin として Box に詰めて呼び出せることを確認
+        let storage: Box<dyn StoragePlugin> = Box::new(MockStorage);
+
+        assert!(storage.put("k", b"v", "text/plain").await.is_ok());
+
+        let data = storage.get("hello").await.unwrap();
+        assert_eq!(data, b"hello");
+
+        assert!(storage.delete("k").await.is_ok());
+
+        let keys = storage.list("").await.unwrap();
+        assert_eq!(keys, vec!["a", "b"]);
+    }
 }
