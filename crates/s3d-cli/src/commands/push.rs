@@ -241,6 +241,7 @@ mod tests {
                 endpoint: None,
                 region: None,
             },
+            src_dir: "src".to_string(),
             output_dir: "output".to_string(),
             include: vec![],
             exclude: vec![],

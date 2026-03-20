@@ -15,43 +15,113 @@
 ## アーキテクチャ
 
 ```
-[output/]  ─→  s3d-deploy  ─→  manifest.json
-                   │
-                   ▼
-              s3d-cli push  ─→  Cloudflare R2 / AWS S3
-                   │
-                   ▼
-           s3d-loader (browser)  ─→  assetsStrategy / strategyAssets
-                   │
-                   ▼
-           s3d-display  ─→  HTML + iframe 正規化
+[src/]  ─→  s3d build  ─→  [output/]  ─→  s3d push  ─→  Cloudflare R2 / AWS S3
+                                 │
+                                 ▼
+                         manifest.json
+                                 │
+                         s3d-loader (browser)
+                                 │
+                         assetsStrategy / strategyAssets
 ```
 
-## クイックスタート
+## 開発者体験 — プロジェクト作成から配信まで
 
 ```bash
+mkdir my-service
+cd my-service
+
 # 1. プロジェクト初期化（インタラクティブ）
 s3d init
 
 # 2. .env に認証情報を記入
 cp .env.example .env
-# S3D_ACCESS_KEY_ID / S3D_SECRET_ACCESS_KEY を設定
+# CLOUDFLARE_R2_ACCESS_KEY_ID / CLOUDFLARE_R2_SECRET_ACCESS_KEY を設定
 
-# 3. アセットを output/ に配置
-cp -r dist/ output/
+# 3. src/ にファイルを配置
+#    （s3d init で src/index.html, src/assets/, src/assetsStrategy/strategy.json が生成済み）
 
-# 4. ビルド（マニフェスト生成）
+# 4. ビルド（マニフェスト生成 + ハッシュ付きファイルを output/ にコピー）
 s3d build
 
-# 5. 差分確認（オプション）
-s3d diff --old old-manifest.json output/manifest.json
-
-# 6. R2/S3 へアップロード
+# 5. R2/S3 へアップロード
 s3d push
 
-# 7. ドライラン（実際にはアップロードしない）
-s3d push --dry-run
+# → R2 で配信完了 🎉
 ```
+
+### `s3d init` 後のディレクトリ構成
+
+```
+my-service/
+├─ s3d.config.json
+├─ .env.example
+├─ .gitignore                  (/target, .env, output/ を含む)
+├─ src/
+│   ├─ index.html              ← スキャフォールドテンプレート
+│   ├─ assetsStrategy/
+│   │   └─ strategy.json       ← 配信戦略の定義
+│   └─ assets/                 ← 自由に配置
+│       ├─ style.css
+│       ├─ main.js
+│       ├─ hero.png
+│       └─ models/
+│           └─ shop.glb
+└─ output/                     ← s3d build の出力（自動生成、.gitignore 済み）
+    ├─ manifest.json
+    └─ ...
+```
+
+### アセット配信の 2 つの方法
+
+**SEO 対象ファイル（クローラに読ませる）:**
+
+```html
+<img src="assets/hero.png" alt="hero" />
+<link rel="stylesheet" href="assets/style.css" />
+```
+
+**SEO 不要の重いアセット（クローラはスキップ、CDN から非同期取得）:**
+
+```html
+<script type="module">
+  const { strategyAssets } = await import('./assetsStrategy/loader.js');
+  const assets = await strategyAssets();
+  // assets.get('assets/models/shop.glb') → CDN URL
+</script>
+```
+
+### `src/assetsStrategy/strategy.json` の例
+
+```json
+{
+  "initial": {
+    "sources": ["assets/style.css", "assets/main.js", "assets/hero.png"],
+    "cache": true
+  },
+  "cdn": {
+    "files": ["assets/models/**", "assets/detail-*.png"],
+    "cache": true,
+    "maxAge": "7d"
+  },
+  "reload": {
+    "trigger": "manifest-change",
+    "strategy": "diff"
+  }
+}
+```
+
+ファイル配置は自由。戦略側で「最初に送るもの」「後から送るもの」を宣言します。
+
+## CLI コマンド
+
+| コマンド | 説明 |
+|---|---|
+| `s3d init` | インタラクティブにプロジェクトを初期化 |
+| `s3d build` | `src/` を収集・ハッシュ化し `output/` にビルド |
+| `s3d diff --old old.json new.json` | 2 つのマニフェストを比較・表示 |
+| `s3d push [--dry-run]` | `output/` を R2/S3 へアップロード |
+| `s3d validate` | `s3d.config.json` / `strategy.json` / 環境変数を検証 |
 
 ## s3d.config.json
 
@@ -64,9 +134,8 @@ s3d push --dry-run
     "cdn_base_url": "https://cdn.example.com",
     "account_id": "your_cloudflare_account_id"
   },
-  "output_dir": "output",
-  "include": [],
-  "exclude": ["**/.DS_Store"]
+  "src_dir": "src",
+  "output_dir": "output"
 }
 ```
 
@@ -74,8 +143,11 @@ s3d push --dry-run
 
 | 変数名 | 説明 |
 |---|---|
-| `S3D_ACCESS_KEY_ID` | R2/S3 アクセスキー ID |
-| `S3D_SECRET_ACCESS_KEY` | R2/S3 シークレットアクセスキー |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare アカウント ID |
+| `CLOUDFLARE_R2_ACCESS_KEY_ID` | R2 アクセスキー ID |
+| `CLOUDFLARE_R2_SECRET_ACCESS_KEY` | R2 シークレットアクセスキー |
+| `S3D_ACCESS_KEY_ID` | 汎用アクセスキー（フォールバック） |
+| `S3D_SECRET_ACCESS_KEY` | 汎用シークレットキー（フォールバック） |
 
 ## ビルド
 
@@ -86,7 +158,7 @@ cargo build
 # テスト
 cargo test
 
-# CLI バイナリのビルド
+# CLI バイナリのビルド (release)
 cargo build -p s3d-cli --release
 ```
 

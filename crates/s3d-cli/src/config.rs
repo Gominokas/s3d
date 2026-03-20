@@ -56,7 +56,10 @@ pub struct StorageConfig {
 pub struct S3dCliConfig {
     pub project: String,
     pub storage: StorageConfig,
-    /// アセット収集のルートディレクトリ（デフォルト: "output"）
+    /// アセット収集のソースディレクトリ（デフォルト: "src"）
+    #[serde(default = "default_src_dir")]
+    pub src_dir: String,
+    /// ビルド出力ディレクトリ（デフォルト: "output"）
     #[serde(default = "default_output_dir")]
     pub output_dir: String,
     /// glob パターン（デフォルト: 空 = 全ファイル）
@@ -68,9 +71,13 @@ pub struct S3dCliConfig {
     /// 最大ファイルサイズ（例: "100MB"）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_file_size: Option<String>,
-    /// manifest.json の出力先（デフォルト: output_dir）
+    /// manifest.json の出力先（デフォルト: output_dir/manifest.json）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<String>,
+}
+
+fn default_src_dir() -> String {
+    "src".to_string()
 }
 
 fn default_output_dir() -> String {
@@ -85,6 +92,13 @@ impl S3dCliConfig {
         } else {
             PathBuf::from(&self.output_dir).join("manifest.json")
         }
+    }
+
+    /// assetsStrategy/strategy.json のパスを解決する（src_dir 相対）
+    pub fn strategy_json_path(&self) -> PathBuf {
+        PathBuf::from(&self.src_dir)
+            .join("assetsStrategy")
+            .join("strategy.json")
     }
 }
 
@@ -128,15 +142,26 @@ pub fn validate_config_and_env(config: &S3dCliConfig) -> Vec<String> {
         errors.push("storage.cdn_base_url が空です".to_string());
     }
 
-    // 必須環境変数
+    // 必須環境変数（CLOUDFLARE_R2_* または S3D_* にフォールバック）
     let required_env = match config.storage.provider {
-        CdnProvider::CloudflareR2 => vec!["S3D_ACCESS_KEY_ID", "S3D_SECRET_ACCESS_KEY"],
-        CdnProvider::AwsS3 => vec!["S3D_ACCESS_KEY_ID", "S3D_SECRET_ACCESS_KEY"],
-        CdnProvider::Custom => vec!["S3D_ACCESS_KEY_ID", "S3D_SECRET_ACCESS_KEY"],
+        CdnProvider::CloudflareR2 => vec![
+            ("CLOUDFLARE_R2_ACCESS_KEY_ID", "S3D_ACCESS_KEY_ID"),
+            ("CLOUDFLARE_R2_SECRET_ACCESS_KEY", "S3D_SECRET_ACCESS_KEY"),
+        ],
+        CdnProvider::AwsS3 | CdnProvider::Custom => vec![
+            ("S3D_ACCESS_KEY_ID", "S3D_ACCESS_KEY_ID"),
+            ("S3D_SECRET_ACCESS_KEY", "S3D_SECRET_ACCESS_KEY"),
+        ],
     };
-    for var in required_env {
-        if std::env::var(var).unwrap_or_default().trim().is_empty() {
-            errors.push(format!("環境変数 {var} が未設定です"));
+    for (primary, fallback) in required_env {
+        let val = std::env::var(primary).unwrap_or_default();
+        let val = if val.trim().is_empty() {
+            std::env::var(fallback).unwrap_or_default()
+        } else {
+            val
+        };
+        if val.trim().is_empty() {
+            errors.push(format!("環境変数 {primary} が未設定です"));
         }
     }
 
@@ -163,12 +188,22 @@ mod tests {
                 endpoint: None,
                 region: None,
             },
+            src_dir: "src".to_string(),
             output_dir: "output".to_string(),
             include: vec![],
             exclude: vec![],
             max_file_size: None,
             manifest_path: None,
         }
+    }
+
+    #[test]
+    fn test_strategy_json_path() {
+        let cfg = sample_config();
+        assert_eq!(
+            cfg.strategy_json_path(),
+            PathBuf::from("src/assetsStrategy/strategy.json")
+        );
     }
 
     #[test]
