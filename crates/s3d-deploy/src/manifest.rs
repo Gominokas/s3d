@@ -146,7 +146,7 @@ pub fn build_manifest(
         };
 
         entries.insert(
-            asset.hashed_key.clone(),
+            asset.key.clone(), // 元のキーでインデックス（diff の比較が正しく機能する）
             AssetEntry {
                 url,
                 size: asset.size,
@@ -209,9 +209,10 @@ mod tests {
         let manifest = build_manifest(&assets, &opts).unwrap();
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.version, "1.0.0");
-        assert!(manifest.assets.contains_key("js/main.abcd1234.js"));
+        // キーは元のパス（ハッシュなし）
+        assert!(manifest.assets.contains_key("js/main.js"));
 
-        let entry = &manifest.assets["js/main.abcd1234.js"];
+        let entry = &manifest.assets["js/main.js"];
         assert_eq!(entry.url, "https://cdn.example.com/js/main.abcd1234.js");
         // mime_guess は "text/javascript" または "application/javascript" を返す
         assert!(entry.content_type.contains("javascript"));
@@ -289,8 +290,10 @@ mod tests {
         };
 
         let manifest = build_manifest(&assets, &opts).unwrap();
-        let gltf_entry = manifest.assets.get("scene.aaaa0001.gltf").unwrap();
+        // gltf エントリのキーは元のパス（ハッシュなし）
+        let gltf_entry = manifest.assets.get("scene.gltf").unwrap();
         let deps = gltf_entry.dependencies.as_ref().unwrap();
+        // 依存先の URL は hashed_key ベース
         assert!(deps.contains(&"buffer.bbbb0002.bin".to_string()));
     }
 }
