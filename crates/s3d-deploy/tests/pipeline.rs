@@ -45,6 +45,7 @@ fn pipeline_collect_hash_manifest() {
         cdn_base_url: "https://cdn.example.com".to_string(),
         version: "1.0.0".to_string(),
         build_time: Some("2026-03-20T00:00:00Z".to_string()),
+        hashed_keys: std::collections::HashSet::new(),
     };
     let manifest = build_manifest(&hashed, &manifest_opts).unwrap();
     assert_eq!(manifest.schema_version, 1);
@@ -79,6 +80,7 @@ fn pipeline_diff_second_deploy() {
         cdn_base_url: "https://cdn.example.com".to_string(),
         version: "1.0.0".to_string(),
         build_time: None,
+        hashed_keys: std::collections::HashSet::new(),
     };
     let manifest_v1 = build_manifest(&hashed, &manifest_opts).unwrap();
 
@@ -104,6 +106,7 @@ fn gltf_dependencies_resolved_in_manifest() {
         cdn_base_url: "https://cdn.example.com".to_string(),
         version: "1.0.0".to_string(),
         build_time: None,
+        hashed_keys: std::collections::HashSet::new(),
     };
     let manifest = build_manifest(&hashed, &manifest_opts).unwrap();
 

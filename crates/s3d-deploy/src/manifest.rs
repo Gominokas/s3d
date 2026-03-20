@@ -7,7 +7,7 @@
 //! glTF アセット (`.gltf` / `.glb`) の依存関係（`.bin` / テクスチャ）は
 //! ファイル内容を解析して自動的にマッピングする。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use s3d_types::asset::HashedAsset;
@@ -105,6 +105,9 @@ pub struct ManifestOptions {
     pub version: String,
     /// ビルド日時（RFC3339）。`None` の場合は現在時刻の代わりに空文字を使う
     pub build_time: Option<String>,
+    /// ハッシュを付与するファイルキーのセット（assetsStrategy の files に含まれるもの）
+    /// 一致するファイルは hashed_key を URL に使用し、それ以外は元の key をそのまま使用する
+    pub hashed_keys: HashSet<String>,
 }
 
 /// [`HashedAsset`] のリストから [`DeployManifest`] を構築する。
@@ -125,7 +128,13 @@ pub fn build_manifest(
     let mut entries: HashMap<String, AssetEntry> = HashMap::new();
 
     for asset in assets {
-        let url = format!("{}/{}", base, asset.hashed_key);
+        // hashed_keys に含まれるファイルのみハッシュ付き URL、それ以外は元のキーをそのまま使う
+        let url_path = if opts.hashed_keys.contains(&asset.key) {
+            asset.hashed_key.clone()
+        } else {
+            asset.key.clone()
+        };
+        let url = format!("{}/{}", base, url_path);
         let content_type = guess_content_type(&asset.key);
 
         // glTF JSON の依存関係解析
@@ -201,19 +210,21 @@ mod tests {
 
         let assets = vec![make_hashed("js/main.js", "abcd1234", 14, js_path)];
 
+        let mut hashed_keys = HashSet::new();
+        hashed_keys.insert("js/main.js".to_string());
         let opts = ManifestOptions {
             cdn_base_url: "https://cdn.example.com".to_string(),
             version: "1.0.0".to_string(),
             build_time: Some("2026-03-20T00:00:00Z".to_string()),
+            hashed_keys,
         };
-
         let manifest = build_manifest(&assets, &opts).unwrap();
-        assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.version, "1.0.0");
         // キーは元のパス（ハッシュなし）
         assert!(manifest.assets.contains_key("js/main.js"));
 
         let entry = &manifest.assets["js/main.js"];
+        // hashed_keys に含まれるので hashed_key ベースの URL
         assert_eq!(entry.url, "https://cdn.example.com/js/main.abcd1234.js");
         // mime_guess は "text/javascript" または "application/javascript" を返す
         assert!(entry.content_type.contains("javascript"));
@@ -248,6 +259,7 @@ mod tests {
             cdn_base_url: "https://cdn.test".to_string(),
             version: "0.1.0".to_string(),
             build_time: Some("2026-01-01T00:00:00Z".to_string()),
+            hashed_keys: HashSet::new(),
         };
         let manifest = build_manifest(&assets, &opts).unwrap();
         let json = manifest_to_json(&manifest).unwrap();
@@ -284,10 +296,14 @@ mod tests {
             make_hashed("buffer.bin", "bbbb0002", 16, bin_path),
         ];
 
+        let mut hashed_keys = HashSet::new();
+        hashed_keys.insert("scene.gltf".to_string());
+        hashed_keys.insert("buffer.bin".to_string());
         let opts = ManifestOptions {
             cdn_base_url: "https://cdn.example.com".to_string(),
             version: "1.0.0".to_string(),
             build_time: None,
+            hashed_keys,
         };
 
         let manifest = build_manifest(&assets, &opts).unwrap();
