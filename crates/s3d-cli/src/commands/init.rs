@@ -6,6 +6,7 @@
 //! - `.gitignore`
 //! - `src/index.html`                         (スキャフォールド HTML)
 //! - `src/assetsStrategy/strategy.json`       (デフォルト配信戦略)
+//! - `src/assetsStrategy/sushi/strategy.json` (サブディレクトリ戦略の例)
 //! - `src/assets/.gitkeep`                    (空ディレクトリ保持)
 //! - `output/`                                (ビルド出力先)
 
@@ -96,6 +97,7 @@ pub fn run() -> Result<()> {
         exclude: vec![],
         max_file_size: None,
         manifest_path: None,
+        plugins: vec![],
     };
 
     save_config(&base_dir.join("s3d.config.json"), &config)?;
@@ -173,7 +175,7 @@ pub(crate) fn scaffold_src(project: &str, base_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&assets_dir)?;
     std::fs::write(assets_dir.join(".gitkeep"), "")?;
 
-    // src/assetsStrategy/strategy.json
+    // src/assetsStrategy/strategy.json (ルートレベルのデフォルト戦略)
     let strategy_dir = base_dir.join("src/assetsStrategy");
     std::fs::create_dir_all(&strategy_dir)?;
     let strategy_json = r#"{
@@ -193,6 +195,23 @@ pub(crate) fn scaffold_src(project: &str, base_dir: &Path) -> Result<()> {
 }
 "#;
     std::fs::write(strategy_dir.join("strategy.json"), strategy_json)?;
+
+    // src/assetsStrategy/sushi/strategy.json (サブディレクトリ戦略の例)
+    // フォルダ名 = strategyAssets("sushi") の呼び出し名と一致
+    let sushi_dir = strategy_dir.join("sushi");
+    std::fs::create_dir_all(&sushi_dir)?;
+    let sushi_strategy_json = r#"{
+  "files": ["assets/sushi.glb"],
+  "initial": false,
+  "cache": true,
+  "maxAge": "7d",
+  "reload": {
+    "trigger": "manifest-change",
+    "strategy": "diff"
+  }
+}
+"#;
+    std::fs::write(sushi_dir.join("strategy.json"), sushi_strategy_json)?;
 
     // src/index.html
     let index_html = format!(
@@ -262,6 +281,7 @@ mod tests {
             exclude: vec![],
             max_file_size: None,
             manifest_path: None,
+            plugins: vec![],
         };
         save_config(&base.join("s3d.config.json"), &config).unwrap();
         write_env_example(&provider, base).unwrap();
@@ -373,5 +393,30 @@ mod tests {
         // 互いに干渉していない
         assert!(!html_a.contains("proj-b"));
         assert!(!html_b.contains("proj-a"));
+    }
+
+    #[test]
+    fn test_scaffold_sushi_strategy_exists() {
+        // サブディレクトリ戦略 (sushi) が生成されていることを確認
+        let dir = TempDir::new().unwrap();
+        scaffold_src("test", dir.path()).unwrap();
+        let sushi_path = dir.path().join("src/assetsStrategy/sushi/strategy.json");
+        assert!(sushi_path.exists(), "sushi/strategy.json が生成されていない");
+        let content = std::fs::read_to_string(&sushi_path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(v.get("files").is_some(), "files フィールドがない");
+        assert!(v.get("initial").is_some(), "initial フィールドがない");
+        assert!(v.get("cache").is_some(), "cache フィールドがない");
+        let files = v["files"].as_array().unwrap();
+        assert!(!files.is_empty(), "files が空");
+    }
+
+    #[test]
+    fn test_config_plugins_field() {
+        // plugins フィールドが空配列で生成されることを確認
+        let dir = make_and_scaffold("plugtest", CdnProvider::CloudflareR2);
+        let loaded =
+            crate::config::load_config(&dir.path().join("s3d.config.json")).unwrap();
+        assert!(loaded.plugins.is_empty(), "plugins は空配列であるべき");
     }
 }

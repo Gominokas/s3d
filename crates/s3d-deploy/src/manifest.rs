@@ -162,6 +162,7 @@ pub fn build_manifest(
         version: opts.version.clone(),
         build_time,
         assets: entries,
+        strategies: HashMap::new(),
     })
 }
 

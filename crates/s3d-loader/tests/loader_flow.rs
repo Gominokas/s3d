@@ -58,6 +58,7 @@ fn make_manifest(base_url: &str, entries: &[(&str, &[u8])]) -> DeployManifest {
         version: "1.0.0".to_string(),
         build_time: "2026-03-20T00:00:00Z".to_string(),
         assets,
+        strategies: std::collections::HashMap::new(),
     }
 }
 

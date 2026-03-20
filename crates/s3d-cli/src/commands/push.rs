@@ -247,6 +247,7 @@ mod tests {
             exclude: vec![],
             max_file_size: None,
             manifest_path: None,
+            plugins: vec![],
         }
     }
 
@@ -277,6 +278,7 @@ mod tests {
             version: "1.0.0".to_string(),
             build_time: "2026-01-01T00:00:00Z".to_string(),
             assets,
+            strategies: HashMap::new(),
         };
         let manifest_path = dir.path().join("output/manifest.json");
         std::fs::write(
@@ -320,6 +322,7 @@ mod tests {
             version: "1.0.0".to_string(),
             build_time: "2026-01-01T00:00:00Z".to_string(),
             assets: assets.clone(),
+            strategies: HashMap::new(),
         };
         let manifest_path = dir.path().join("output/manifest.json");
         std::fs::write(
