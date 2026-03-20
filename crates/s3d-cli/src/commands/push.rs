@@ -49,6 +49,33 @@ pub async fn run(
     let cdn_url = config.storage.cdn_base_url.trim_end_matches('/');
     rewrite_urls_to_cdn(&mut new_manifest, cdn_url);
 
+    // ── loader.js をアップロード（manifest 外の固定ファイル・常時アップロード）
+    // `s3d build` が output/loader.js を生成するが manifest には含まれない。
+    // 差分計算の対象外のため、変更なし早期 return の前に必ずアップロードする。
+    // これにより初回 push でも CDN 上に loader.js が確実に配置される。
+    if !dry_run {
+        let loader_path = output_dir.join("loader.js");
+        if loader_path.exists() {
+            match std::fs::read(&loader_path) {
+                Ok(data) => {
+                    match storage
+                        .put("loader.js", &data, "application/javascript")
+                        .await
+                    {
+                        Ok(_) => println!("  {} loader.js をアップロードしました", "↑".green()),
+                        Err(e) => eprintln!("  {} loader.js アップロード失敗: {}", "✘".red(), e.message),
+                    }
+                }
+                Err(e) => eprintln!("  {} loader.js 読み込み失敗: {e}", "✘".red()),
+            }
+        } else {
+            eprintln!(
+                "  {} output/loader.js が見つかりません（s3d build を先に実行してください）",
+                "⚠".yellow()
+            );
+        }
+    }
+
     // ── R2 から旧 manifest.json を取得
     let old_manifest = fetch_remote_manifest(storage.as_ref(), "manifest.json").await;
 
@@ -58,7 +85,7 @@ pub async fn run(
     let to_delete = needs_delete(&entries);
 
     if to_upload.is_empty() && to_delete.is_empty() {
-        println!("{}", "変更なし。アップロードは不要です。".dimmed());
+        println!("{}", "変更なし。アセットのアップロードは不要です。".dimmed());
         return Ok(());
     }
 
@@ -161,30 +188,6 @@ pub async fn run(
             Ok(_) => println!("  {} {}", "✕".red(), key),
             Err(e) => eprintln!("  {} 削除失敗 {key}: {}", "✘".red(), e.message),
         }
-    }
-
-    // ── loader.js をアップロード（manifest 外の固定ファイル）
-    // `s3d build` が output/loader.js を生成するが、manifest には含まれない。
-    // push 時に毎回アップロードして CDN 上で 404 にならないようにする。
-    let loader_path = output_dir.join("loader.js");
-    if loader_path.exists() {
-        match std::fs::read(&loader_path) {
-            Ok(data) => {
-                match storage
-                    .put("loader.js", &data, "application/javascript")
-                    .await
-                {
-                    Ok(_) => println!("  {} loader.js をアップロードしました", "↑".green()),
-                    Err(e) => eprintln!("  {} loader.js アップロード失敗: {}", "✘".red(), e.message),
-                }
-            }
-            Err(e) => eprintln!("  {} loader.js 読み込み失敗: {e}", "✘".red()),
-        }
-    } else {
-        eprintln!(
-            "  {} output/loader.js が見つかりません（s3d build を先に実行してください）",
-            "⚠".yellow()
-        );
     }
 
     // ── manifest.json をアップロード
@@ -550,17 +553,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_push_no_changes_still_uploads_loader_js() {
-        // アセットに変更がない（no changes）ときでも loader.js はアップロードされない
-        // （変更なし早期 return するため。loader.js は差分があるときのみアップロード）
-        // ※ "変更なし" で早期 return する場合は loader.js もスキップされる仕様
-        //   → これは意図通りの動作（変更なし = 全ファイル同一 = loader.js も同一）
+        // アセットに変更がない（no changes）ときでも loader.js はアップロードされる
+        // loader.js は差分計算の対象外のため、変更なし early return の前に必ずアップロードする
         use s3d_types::manifest::{AssetEntry, DeployManifest};
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let output = dir.path().join("output");
         std::fs::create_dir_all(&output).unwrap();
-        std::fs::write(output.join("loader.js"), b"export{strategyAssets}").unwrap();
+        let loader_content = b"export{strategyAssets}";
+        std::fs::write(output.join("loader.js"), loader_content).unwrap();
 
         let mut assets = HashMap::new();
         assets.insert(
@@ -591,7 +593,7 @@ mod tests {
         let cfg = make_config();
         crate::config::save_config(&cfg_path, &cfg).unwrap();
 
-        // リモートに CDN URL で同じ内容の manifest が既にある（変更なし）
+        // リモートに CDN URL で同じ内容の manifest が既にある（アセット変更なし）
         let mut cdn_assets = HashMap::new();
         cdn_assets.insert(
             "app.js".to_string(),
@@ -620,15 +622,14 @@ mod tests {
         }
         let storage_dyn: Arc<dyn StoragePlugin> = storage.clone();
 
-        // 変更なし → 早期 return → loader.js もアップロードされない（仕様通り）
+        // アセット変更なしでも run は成功する
         run(&cfg, &cfg_path, Some(&manifest_path), false, Arc::clone(&storage_dyn))
             .await
             .unwrap();
 
-        // loader.js はアップロードされていない（変更なし早期 return のため）
-        assert!(
-            storage.get("loader.js").await.is_err(),
-            "変更なし時は loader.js もアップロードされない（早期 return）"
-        );
+        // loader.js は変更なし early return の前にアップロードされている
+        let uploaded = storage.get("loader.js").await
+            .expect("変更なし時でも loader.js はアップロードされるべき");
+        assert_eq!(uploaded, loader_content, "loader.js の内容が一致しない");
     }
 }
