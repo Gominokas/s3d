@@ -7,7 +7,7 @@
 //! - `Added`   : 新バージョンにのみ存在 → アップロード必要
 //! - `Modified`: 両方に存在するがハッシュが異なる → アップロード必要
 //! - `Deleted` : 旧バージョンにのみ存在 → 削除候補
-//! - `Unchanged`: 両方に存在しハッシュが同一 → スキップ可
+//! - `Unchanged`: 両方に存在しハッシュ AND URL が同一 → スキップ可
 
 use s3d_types::asset::AssetDiff;
 use s3d_types::manifest::DeployManifest;
@@ -47,7 +47,13 @@ pub fn diff_manifests(old: Option<&DeployManifest>, new: &DeployManifest) -> Vec
     // 新バージョン側を走査
     for (key, new_entry) in &new.assets {
         let diff = match old_assets.get(key) {
-            Some(old_entry) if old_entry.hash == new_entry.hash => AssetDiff::Unchanged,
+            // hash AND url の両方が一致する場合のみ Unchanged
+            // url が変わった場合（例: ハッシュなし→ハッシュ付きへの移行）もアップロード対象にする
+            Some(old_entry)
+                if old_entry.hash == new_entry.hash && old_entry.url == new_entry.url =>
+            {
+                AssetDiff::Unchanged
+            }
             Some(_) => AssetDiff::Modified,
             None => AssetDiff::Added,
         };
@@ -135,6 +141,91 @@ mod tests {
         let entries = diff_manifests(Some(&old), &new);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].diff, AssetDiff::Unchanged);
+    }
+
+    #[test]
+    fn diff_url_changed_same_hash_is_modified() {
+        // Issue #37: hash が同じでも url が変わったら Modified になることを確認
+        // 例: 論理キー名のまま push 済み → ハッシュ付き URL に変わった場合
+        use s3d_types::manifest::AssetEntry;
+
+        let mut old_assets = HashMap::new();
+        old_assets.insert(
+            "assets/cake-3d.bin".to_string(),
+            AssetEntry {
+                url: "https://cdn.test/assets/cake-3d.bin".to_string(), // ハッシュなし URL
+                size: 1,
+                hash: "30e14955".to_string(),
+                content_type: "application/octet-stream".to_string(),
+                dependencies: None,
+            },
+        );
+        let old = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets: old_assets,
+            strategies: HashMap::new(),
+        };
+
+        let mut new_assets = HashMap::new();
+        new_assets.insert(
+            "assets/cake-3d.bin".to_string(),
+            AssetEntry {
+                url: "https://cdn.test/assets/cake-3d.30e14955.bin".to_string(), // ハッシュ付き URL
+                size: 1,
+                hash: "30e14955".to_string(), // hash は同じ
+                content_type: "application/octet-stream".to_string(),
+                dependencies: None,
+            },
+        );
+        let new = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets: new_assets,
+            strategies: HashMap::new(),
+        };
+
+        let entries = diff_manifests(Some(&old), &new);
+        assert_eq!(entries.len(), 1);
+        // hash が同じでも url が違うので Modified
+        assert_eq!(entries[0].diff, AssetDiff::Modified,
+            "hash が同一でも url が変わった場合は Modified であるべき");
+    }
+
+    #[test]
+    fn diff_unchanged_requires_both_hash_and_url() {
+        // hash AND url の両方が一致する場合のみ Unchanged
+        use s3d_types::manifest::AssetEntry;
+
+        let make_entry = |url: &str, hash: &str| AssetEntry {
+            url: url.to_string(),
+            size: 1,
+            hash: hash.to_string(),
+            content_type: "application/octet-stream".to_string(),
+            dependencies: None,
+        };
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "a.glb".to_string(),
+            make_entry("https://cdn.test/a.abcd1234.glb", "abcd1234"),
+        );
+        let old = DeployManifest {
+            schema_version: 1, version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets: assets.clone(), strategies: HashMap::new(),
+        };
+        let new = DeployManifest {
+            schema_version: 1, version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets, strategies: HashMap::new(),
+        };
+
+        let entries = diff_manifests(Some(&old), &new);
+        assert_eq!(entries[0].diff, AssetDiff::Unchanged,
+            "hash AND url が同一なら Unchanged");
     }
 
     #[test]
