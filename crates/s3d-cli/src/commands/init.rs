@@ -9,6 +9,8 @@
 //! - `src/assets/.gitkeep`                    (空ディレクトリ保持)
 //! - `output/`                                (ビルド出力先)
 
+use std::path::Path;
+
 use anyhow::Result;
 use colored::Colorize;
 use dialoguer::{Input, Select};
@@ -74,6 +76,9 @@ pub fn run() -> Result<()> {
         None
     };
 
+    // ── カレントディレクトリを base_dir として使用（set_current_dir 不使用）
+    let base_dir = std::env::current_dir()?;
+
     // ── 設定ファイルを生成
     let config = S3dCliConfig {
         project: project.clone(),
@@ -93,23 +98,23 @@ pub fn run() -> Result<()> {
         manifest_path: None,
     };
 
-    save_config(std::path::Path::new("s3d.config.json"), &config)?;
+    save_config(&base_dir.join("s3d.config.json"), &config)?;
     println!("{}", "✔ s3d.config.json を生成しました".green());
 
     // ── .env.example
-    write_env_example(&provider)?;
+    write_env_example(&provider, &base_dir)?;
     println!("{}", "✔ .env.example を生成しました".green());
 
     // ── .gitignore
-    write_gitignore()?;
+    write_gitignore(&base_dir)?;
     println!("{}", "✔ .gitignore を更新しました".green());
 
     // ── src/ スキャフォールド
-    scaffold_src(&project)?;
+    scaffold_src(&project, &base_dir)?;
     println!("{}", "✔ src/ を生成しました".green());
 
     // ── output/ ディレクトリ
-    std::fs::create_dir_all("output")?;
+    std::fs::create_dir_all(base_dir.join("output"))?;
     println!("{}", "✔ output/ ディレクトリを作成しました".green());
 
     println!();
@@ -123,10 +128,10 @@ pub fn run() -> Result<()> {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Scaffold helpers
+// Scaffold helpers — すべて base_dir を受け取り、cwd に依存しない
 // ──────────────────────────────────────────────────────────────
 
-fn write_env_example(provider: &CdnProvider) -> Result<()> {
+pub(crate) fn write_env_example(provider: &CdnProvider, base_dir: &Path) -> Result<()> {
     let content = match provider {
         CdnProvider::CloudflareR2 => {
             "CLOUDFLARE_ACCOUNT_ID=your_cloudflare_account_id\n\
@@ -138,14 +143,14 @@ fn write_env_example(provider: &CdnProvider) -> Result<()> {
              S3D_SECRET_ACCESS_KEY=your_secret_access_key\n"
         }
     };
-    std::fs::write(".env.example", content)?;
+    std::fs::write(base_dir.join(".env.example"), content)?;
     Ok(())
 }
 
-fn write_gitignore() -> Result<()> {
-    let path = std::path::Path::new(".gitignore");
+pub(crate) fn write_gitignore(base_dir: &Path) -> Result<()> {
+    let path = base_dir.join(".gitignore");
     let mut content = if path.exists() {
-        std::fs::read_to_string(path)?
+        std::fs::read_to_string(&path)?
     } else {
         String::new()
     };
@@ -158,17 +163,19 @@ fn write_gitignore() -> Result<()> {
             content.push('\n');
         }
     }
-    std::fs::write(path, &content)?;
+    std::fs::write(&path, &content)?;
     Ok(())
 }
 
-fn scaffold_src(project: &str) -> Result<()> {
+pub(crate) fn scaffold_src(project: &str, base_dir: &Path) -> Result<()> {
     // src/assets/.gitkeep
-    std::fs::create_dir_all("src/assets")?;
-    std::fs::write("src/assets/.gitkeep", "")?;
+    let assets_dir = base_dir.join("src/assets");
+    std::fs::create_dir_all(&assets_dir)?;
+    std::fs::write(assets_dir.join(".gitkeep"), "")?;
 
     // src/assetsStrategy/strategy.json
-    std::fs::create_dir_all("src/assetsStrategy")?;
+    let strategy_dir = base_dir.join("src/assetsStrategy");
+    std::fs::create_dir_all(&strategy_dir)?;
     let strategy_json = r#"{
   "initial": {
     "sources": ["assets/style.css", "assets/main.js", "assets/hero.png"],
@@ -185,7 +192,7 @@ fn scaffold_src(project: &str) -> Result<()> {
   }
 }
 "#;
-    std::fs::write("src/assetsStrategy/strategy.json", strategy_json)?;
+    std::fs::write(strategy_dir.join("strategy.json"), strategy_json)?;
 
     // src/index.html
     let index_html = format!(
@@ -218,24 +225,26 @@ fn scaffold_src(project: &str) -> Result<()> {
 "#,
         project = project
     );
-    std::fs::write("src/index.html", &index_html)?;
+    std::fs::write(base_dir.join("src/index.html"), &index_html)?;
 
     Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────
-// Tests
+// Tests — set_current_dir を一切使わない
 // ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    use super::{scaffold_src, write_env_example, write_gitignore};
     use crate::config::{load_config, save_config, CdnProvider, S3dCliConfig, StorageConfig};
     use tempfile::TempDir;
 
+    /// TempDir を base_dir として直接渡してスキャフォールドを生成する。
+    /// set_current_dir は使わない。
     fn make_and_scaffold(project: &str, provider: CdnProvider) -> TempDir {
         let dir = TempDir::new().unwrap();
-        let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
+        let base = dir.path();
 
         let config = S3dCliConfig {
             project: project.to_string(),
@@ -254,13 +263,12 @@ mod tests {
             max_file_size: None,
             manifest_path: None,
         };
-        save_config(std::path::Path::new("s3d.config.json"), &config).unwrap();
-        super::write_env_example(&provider).unwrap();
-        super::write_gitignore().unwrap();
-        super::scaffold_src(project).unwrap();
-        std::fs::create_dir_all("output").unwrap();
+        save_config(&base.join("s3d.config.json"), &config).unwrap();
+        write_env_example(&provider, base).unwrap();
+        write_gitignore(base).unwrap();
+        scaffold_src(project, base).unwrap();
+        std::fs::create_dir_all(base.join("output")).unwrap();
 
-        std::env::set_current_dir(&orig).unwrap();
         dir
     }
 
@@ -276,17 +284,16 @@ mod tests {
     #[test]
     fn test_scaffold_src_structure() {
         let dir = make_and_scaffold("myapp", CdnProvider::CloudflareR2);
-        // ディレクトリ
-        assert!(dir.path().join("src").is_dir());
-        assert!(dir.path().join("src/assets").is_dir());
-        assert!(dir.path().join("src/assetsStrategy").is_dir());
-        assert!(dir.path().join("output").is_dir());
-        // ファイル
-        assert!(dir.path().join("src/index.html").exists());
-        assert!(dir.path().join("src/assetsStrategy/strategy.json").exists());
-        assert!(dir.path().join("src/assets/.gitkeep").exists());
-        assert!(dir.path().join(".env.example").exists());
-        assert!(dir.path().join(".gitignore").exists());
+        let base = dir.path();
+        assert!(base.join("src").is_dir());
+        assert!(base.join("src/assets").is_dir());
+        assert!(base.join("src/assetsStrategy").is_dir());
+        assert!(base.join("output").is_dir());
+        assert!(base.join("src/index.html").exists());
+        assert!(base.join("src/assetsStrategy/strategy.json").exists());
+        assert!(base.join("src/assets/.gitkeep").exists());
+        assert!(base.join(".env.example").exists());
+        assert!(base.join(".gitignore").exists());
     }
 
     #[test]
@@ -317,11 +324,54 @@ mod tests {
     }
 
     #[test]
+    fn test_env_example_aws() {
+        let dir = make_and_scaffold("proj", CdnProvider::AwsS3);
+        let content = std::fs::read_to_string(dir.path().join(".env.example")).unwrap();
+        assert!(content.contains("S3D_ACCESS_KEY_ID"));
+        assert!(content.contains("S3D_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
     fn test_gitignore_contains_output() {
         let dir = make_and_scaffold("proj", CdnProvider::CloudflareR2);
         let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(content.contains("output/"));
         assert!(content.contains(".env"));
         assert!(content.contains("/target"));
+    }
+
+    #[test]
+    fn test_gitignore_no_duplicate_entries() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        // 既存の .gitignore に /target と .env が既にある場合
+        std::fs::write(base.join(".gitignore"), "/target\n.env\n").unwrap();
+        write_gitignore(base).unwrap();
+        let content = std::fs::read_to_string(base.join(".gitignore")).unwrap();
+        // /target は1回だけ現れる
+        assert_eq!(content.matches("/target").count(), 1);
+        // .env は1回だけ現れる
+        assert_eq!(content.matches(".env\n").count(), 1);
+        // output/ は追記される
+        assert!(content.contains("output/"));
+    }
+
+    #[test]
+    fn test_scaffold_independent_dirs() {
+        // 2つのテストが同時に異なるディレクトリで動いても競合しないことを確認
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+
+        scaffold_src("proj-a", dir_a.path()).unwrap();
+        scaffold_src("proj-b", dir_b.path()).unwrap();
+
+        let html_a = std::fs::read_to_string(dir_a.path().join("src/index.html")).unwrap();
+        let html_b = std::fs::read_to_string(dir_b.path().join("src/index.html")).unwrap();
+
+        assert!(html_a.contains("proj-a"));
+        assert!(html_b.contains("proj-b"));
+        // 互いに干渉していない
+        assert!(!html_a.contains("proj-b"));
+        assert!(!html_b.contains("proj-a"));
     }
 }
