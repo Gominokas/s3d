@@ -18,7 +18,7 @@ pub use loader::{
     AssetResult, LoadAllOptions, LoadError, LoadErrorKind, LoadOptions, LoaderOptions,
     ProgressEvent, ResponseType,
 };
-pub use manifest::{AssetEntry, DeployManifest};
+pub use manifest::{AssetEntry, DeployManifest, StrategyEntry, StrategyReload};
 pub use plugin::{
     DisplayPlugin, HtmlOutput, RenderContext, StorageError, StoragePlugin, StorageResult,
 };
@@ -141,6 +141,7 @@ mod tests {
             version: "1.0.0".to_string(),
             build_time: "2026-03-20T00:00:00Z".to_string(),
             assets,
+            strategies: std::collections::HashMap::new(),
         };
 
         let json = serde_json::to_string(&manifest).expect("serialization failed");

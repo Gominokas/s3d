@@ -2,7 +2,13 @@
 //!
 //! `src/` を読み取り、ハッシュ付きファイルを `output/` にコピーして
 //! `output/manifest.json` を生成する。
+//!
+//! ## manifest.json の strategies セクション
+//! `src/assetsStrategy/` 配下のサブディレクトリを走査し、各ディレクトリの
+//! `strategy.json` を読み込んで `manifest.json` の `strategies` セクションに追加する。
+//! フォルダ名が `strategyAssets("name")` の呼び出し名と一致する。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -13,6 +19,7 @@ use s3d_deploy::{
     hash::hash_assets,
     manifest::{build_manifest, manifest_to_json, ManifestOptions},
 };
+use s3d_types::manifest::{StrategyEntry, StrategyReload};
 
 use crate::config::S3dCliConfig;
 
@@ -75,9 +82,18 @@ pub fn run(config: &S3dCliConfig, config_path: &Path) -> Result<()> {
         version: "1.0.0".to_string(),
         build_time: Some(chrono::Utc::now().to_rfc3339()),
     };
-    let manifest = build_manifest(&hashed, &manifest_opts).context("マニフェスト生成エラー")?;
+    let mut manifest = build_manifest(&hashed, &manifest_opts).context("マニフェスト生成エラー")?;
 
-    // ── 5. manifest.json の書き込み
+    // ── 5. strategies セクションを構築 (src/assetsStrategy/ サブディレクトリ走査)
+    let strategies_root = src_dir.join("assetsStrategy");
+    let strategies = scan_strategies(&strategies_root)
+        .context("assetsStrategy ディレクトリの走査エラー")?;
+    if !strategies.is_empty() {
+        println!("  strategies: {} 件", strategies.len().to_string().bold());
+    }
+    manifest.strategies = strategies;
+
+    // ── 6. manifest.json の書き込み
     let manifest_path = config.resolved_manifest_path();
     let manifest_path = if manifest_path.is_absolute() {
         manifest_path
@@ -105,6 +121,104 @@ pub fn run(config: &S3dCliConfig, config_path: &Path) -> Result<()> {
     println!("  ビルド時間   : {:.2}s", elapsed.as_secs_f64());
 
     Ok(())
+}
+
+/// `src/assetsStrategy/` 配下のサブディレクトリを走査し、
+/// 各サブディレクトリの `strategy.json` を読み込んで `StrategyEntry` マップを返す。
+///
+/// - ルートの `strategy.json`（サブディレクトリでないもの）はスキップ
+/// - `strategy.json` が存在しないサブディレクトリもスキップ（警告なし）
+pub fn scan_strategies(strategies_root: &Path) -> Result<HashMap<String, StrategyEntry>> {
+    let mut map = HashMap::new();
+
+    if !strategies_root.exists() {
+        return Ok(map);
+    }
+
+    let entries = std::fs::read_dir(strategies_root)
+        .with_context(|| format!("assetsStrategy の読み込み失敗: {}", strategies_root.display()))?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        // サブディレクトリのみ対象
+        if !path.is_dir() {
+            continue;
+        }
+
+        let strategy_file = path.join("strategy.json");
+        if !strategy_file.exists() {
+            continue;
+        }
+
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&strategy_file).with_context(|| {
+            format!("strategy.json の読み込み失敗: {}", strategy_file.display())
+        })?;
+
+        let strategy = parse_strategy_json(&content, &name).with_context(|| {
+            format!(
+                "strategy.json のパース失敗 ({}): {}",
+                name,
+                strategy_file.display()
+            )
+        })?;
+
+        map.insert(name, strategy);
+    }
+
+    Ok(map)
+}
+
+/// strategy.json の JSON 文字列を `StrategyEntry` にパースする。
+fn parse_strategy_json(content: &str, name: &str) -> Result<StrategyEntry> {
+    let v: serde_json::Value =
+        serde_json::from_str(content).with_context(|| format!("{} の JSON パース失敗", name))?;
+
+    let files: Vec<String> = v
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let initial = v
+        .get("initial")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+
+    let cache = v.get("cache").and_then(|x| x.as_bool()).unwrap_or(true);
+
+    let max_age = v
+        .get("maxAge")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+
+    let reload = v.get("reload").and_then(|r| {
+        let trigger = r.get("trigger")?.as_str()?.to_string();
+        let strategy = r.get("strategy")?.as_str()?.to_string();
+        Some(StrategyReload { trigger, strategy })
+    });
+
+    Ok(StrategyEntry {
+        files,
+        initial,
+        cache,
+        max_age,
+        reload,
+    })
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -146,6 +260,7 @@ mod tests {
             exclude: vec![],
             max_file_size: None,
             manifest_path: None,
+            plugins: vec![],
         }
     }
 
@@ -211,5 +326,92 @@ mod tests {
         assert_eq!(format_bytes(500), "500 B");
         assert_eq!(format_bytes(1024), "1.00 KB");
         assert_eq!(format_bytes(1_048_576), "1.00 MB");
+    }
+
+    #[test]
+    fn test_scan_strategies_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        // assetsStrategy ディレクトリなし → 空マップ
+        let result = scan_strategies(dir.path()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_scan_strategies_with_subdir() {
+        let dir = TempDir::new().unwrap();
+        let sushi_dir = dir.path().join("sushi");
+        std::fs::create_dir_all(&sushi_dir).unwrap();
+        std::fs::write(
+            sushi_dir.join("strategy.json"),
+            r#"{"files":["assets/sushi.glb"],"initial":false,"cache":true,"maxAge":"7d","reload":{"trigger":"manifest-change","strategy":"diff"}}"#,
+        )
+        .unwrap();
+
+        let result = scan_strategies(dir.path()).unwrap();
+        assert_eq!(result.len(), 1);
+        let sushi = result.get("sushi").expect("sushi エントリがない");
+        assert_eq!(sushi.files, vec!["assets/sushi.glb"]);
+        assert!(!sushi.initial);
+        assert!(sushi.cache);
+        assert_eq!(sushi.max_age.as_deref(), Some("7d"));
+        let reload = sushi.reload.as_ref().expect("reload がない");
+        assert_eq!(reload.trigger, "manifest-change");
+        assert_eq!(reload.strategy, "diff");
+    }
+
+    #[test]
+    fn test_scan_strategies_skips_root_json() {
+        let dir = TempDir::new().unwrap();
+        // ルートの strategy.json (サブディレクトリでない) はスキップされる
+        std::fs::write(dir.path().join("strategy.json"), r#"{"files":[],"initial":false,"cache":true}"#).unwrap();
+        let result = scan_strategies(dir.path()).unwrap();
+        assert!(result.is_empty(), "ルート strategy.json はスキップされるべき");
+    }
+
+    #[test]
+    fn test_scan_strategies_subdir_without_strategy_json() {
+        let dir = TempDir::new().unwrap();
+        // strategy.json のないサブディレクトリはスキップ
+        std::fs::create_dir_all(dir.path().join("empty_strategy")).unwrap();
+        let result = scan_strategies(dir.path()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_build_manifest_contains_strategies() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let assets_dir = src.join("assets");
+        let strategy_dir = src.join("assetsStrategy").join("sushi");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::create_dir_all(&strategy_dir).unwrap();
+
+        // ダミーアセット
+        std::fs::write(assets_dir.join("sushi.glb"), b"glb-data").unwrap();
+
+        // sushi strategy
+        std::fs::write(
+            strategy_dir.join("strategy.json"),
+            r#"{"files":["assets/sushi.glb"],"initial":false,"cache":true,"maxAge":"7d","reload":{"trigger":"manifest-change","strategy":"diff"}}"#,
+        )
+        .unwrap();
+
+        let config_path = dir.path().join("s3d.config.json");
+        let cfg = make_config("src");
+        crate::config::save_config(&config_path, &cfg).unwrap();
+
+        run(&cfg, &config_path).unwrap();
+
+        let manifest_path = dir.path().join("output/manifest.json");
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // strategies セクションが存在する
+        let strategies = v.get("strategies").expect("strategies セクションがない");
+        let sushi = strategies.get("sushi").expect("sushi エントリがない");
+        let files = sushi["files"].as_array().expect("files が配列でない");
+        assert!(!files.is_empty(), "files が空");
+        assert_eq!(sushi["cache"].as_bool(), Some(true));
+        assert_eq!(sushi["maxAge"].as_str(), Some("7d"));
     }
 }

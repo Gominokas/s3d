@@ -127,6 +127,7 @@ mod tests {
                 version: "1.0.0".to_string(),
                 build_time: "2026-01-01T00:00:00Z".to_string(),
                 assets,
+                strategies: std::collections::HashMap::new(),
             };
             serde_json::to_string_pretty(&m).unwrap()
         };

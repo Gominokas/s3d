@@ -74,6 +74,9 @@ pub struct S3dCliConfig {
     /// manifest.json の出力先（デフォルト: output_dir/manifest.json）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<String>,
+    /// 将来のプラグイン機構用（予約フィールド）
+    #[serde(default)]
+    pub plugins: Vec<serde_json::Value>,
 }
 
 fn default_src_dir() -> String {
@@ -194,7 +197,31 @@ mod tests {
             exclude: vec![],
             max_file_size: None,
             manifest_path: None,
+            plugins: vec![],
         }
+    }
+
+    #[test]
+    fn test_plugins_field_default() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // plugins フィールドなしの JSON を保存してもデフォルト空配列で読める
+        std::fs::write(
+            tmp.path(),
+            r#"{"project":"p","storage":{"provider":"cloudflare-r2","bucket":"b","cdn_base_url":"https://cdn.example.com"}}"#,
+        )
+        .unwrap();
+        let loaded = load_config(tmp.path()).unwrap();
+        assert!(loaded.plugins.is_empty());
+    }
+
+    #[test]
+    fn test_plugins_field_serialized() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cfg = sample_config();
+        save_config(tmp.path(), &cfg).unwrap();
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        // plugins フィールドが JSON に含まれている
+        assert!(content.contains("plugins"));
     }
 
     #[test]
