@@ -3,6 +3,10 @@
 //! `src/` を読み取り、ファイルを `output/` にコピーして
 //! `output/manifest.json` を生成する。
 //!
+//! ## クリーンビルド（デフォルト）
+//! ビルド前に `output/` 内の全ファイルを削除する。
+//! `--no-clean` オプションで削除をスキップできる（増分ビルド用）。
+//!
 //! ## ハッシュ付与ロジック
 //! `src/assetsStrategy/**/strategy.json` の `files` フィールドに列挙されたファイルのみ
 //! ハッシュ付きファイル名でコピーする（CDN 長期キャッシュ対象）。
@@ -30,7 +34,10 @@ use s3d_types::manifest::{StrategyEntry, StrategyReload};
 use crate::config::S3dCliConfig;
 
 /// `s3d build` を実行する
-pub fn run(config: &S3dCliConfig, config_path: &Path) -> Result<()> {
+///
+/// `no_clean = false`（デフォルト）の場合、ビルド前に `output/` 内を全削除する。
+/// `no_clean = true` の場合は削除せず増分コピーのみ行う。
+pub fn run(config: &S3dCliConfig, config_path: &Path, no_clean: bool) -> Result<()> {
     let start = Instant::now();
     let project_root = config_path.parent().unwrap_or(Path::new("."));
     let src_dir = project_root.join(&config.src_dir);
@@ -45,6 +52,15 @@ pub fn run(config: &S3dCliConfig, config_path: &Path) -> Result<()> {
             "ソースディレクトリが見つかりません: {}\n`s3d init` を実行して src/ を生成してください。",
             src_dir.display()
         );
+    }
+
+    // ── 0. output/ クリーン（--no-clean 指定時はスキップ）
+    if !no_clean && output_dir.exists() {
+        clean_output_dir(&output_dir)
+            .with_context(|| format!("output/ のクリーンに失敗: {}", output_dir.display()))?;
+        println!("  {} output/ をクリーンしました", "✔".green());
+    } else if no_clean {
+        println!("  {} --no-clean: output/ のクリーンをスキップ", "ℹ".cyan());
     }
 
     // ── 1. 収集
@@ -243,6 +259,26 @@ fn parse_strategy_json(content: &str, name: &str) -> Result<StrategyEntry> {
     })
 }
 
+/// `output_dir` 内の全エントリを削除する（ディレクトリ自体は残す）。
+///
+/// ディレクトリエントリはサブツリーごと削除し、ファイル/シンボリックリンクは個別削除。
+pub fn clean_output_dir(output_dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(output_dir)
+        .with_context(|| format!("output/ の読み込み失敗: {}", output_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("ディレクトリ削除失敗: {}", path.display()))?;
+        } else {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("ファイル削除失敗: {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
@@ -298,7 +334,7 @@ mod tests {
         let cfg = make_config("src");
         crate::config::save_config(&config_path, &cfg).unwrap();
 
-        run(&cfg, &config_path).unwrap();
+        run(&cfg, &config_path, false).unwrap();
 
         // manifest.json が生成されている
         let manifest_path = dir.path().join("output/manifest.json");
@@ -341,7 +377,7 @@ mod tests {
         let config_path = dir.path().join("s3d.config.json");
         let cfg = make_config("src");
         crate::config::save_config(&config_path, &cfg).unwrap();
-        assert!(run(&cfg, &config_path).is_err());
+        assert!(run(&cfg, &config_path, false).is_err());
     }
 
     #[test]
@@ -423,7 +459,7 @@ mod tests {
         let cfg = make_config("src");
         crate::config::save_config(&config_path, &cfg).unwrap();
 
-        run(&cfg, &config_path).unwrap();
+        run(&cfg, &config_path, false).unwrap();
 
         let manifest_path = dir.path().join("output/manifest.json");
         let content = std::fs::read_to_string(&manifest_path).unwrap();
@@ -465,7 +501,7 @@ mod tests {
         let cfg = make_config("src");
         crate::config::save_config(&config_path, &cfg).unwrap();
 
-        run(&cfg, &config_path).unwrap();
+        run(&cfg, &config_path, false).unwrap();
 
         // output/assets/ 以下を収集
         let output_assets: Vec<_> = std::fs::read_dir(dir.path().join("output/assets"))
@@ -538,7 +574,7 @@ mod tests {
         let cfg = make_config("src");
         crate::config::save_config(&config_path, &cfg).unwrap();
 
-        run(&cfg, &config_path).unwrap();
+        run(&cfg, &config_path, false).unwrap();
 
         let manifest_path = dir.path().join("output/manifest.json");
         let content = std::fs::read_to_string(&manifest_path).unwrap();
@@ -563,5 +599,90 @@ mod tests {
             "hero.png がマニフェストに含まれるべき: {:?}",
             assets.keys().collect::<Vec<_>>()
         );
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // clean / no-clean テスト
+    // ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_cleans_output_by_default() {
+        // デフォルト(no_clean=false)では前回のファイルが削除される
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.js"), b"console.log(1);").unwrap();
+
+        let config_path = dir.path().join("s3d.config.json");
+        let cfg = make_config("src");
+        crate::config::save_config(&config_path, &cfg).unwrap();
+
+        // 1回目のビルド
+        run(&cfg, &config_path, false).unwrap();
+
+        // output/ に古い残留ファイルを手動で配置
+        let output_dir = dir.path().join("output");
+        std::fs::write(output_dir.join("stale_file.txt"), b"old data").unwrap();
+        assert!(output_dir.join("stale_file.txt").exists(), "前提: stale_file.txt が存在する");
+
+        // 2回目のビルド（no_clean=false）→ 古いファイルが削除される
+        run(&cfg, &config_path, false).unwrap();
+
+        assert!(
+            !output_dir.join("stale_file.txt").exists(),
+            "stale_file.txt はクリーンで削除されるべき"
+        );
+        // manifest.json は再生成されている
+        assert!(output_dir.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn test_build_no_clean_keeps_stale_files() {
+        // --no-clean では前回のファイルが残る
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.js"), b"console.log(1);").unwrap();
+
+        let config_path = dir.path().join("s3d.config.json");
+        let cfg = make_config("src");
+        crate::config::save_config(&config_path, &cfg).unwrap();
+
+        // 1回目のビルド
+        run(&cfg, &config_path, false).unwrap();
+
+        // output/ に古い残留ファイルを手動で配置
+        let output_dir = dir.path().join("output");
+        std::fs::write(output_dir.join("stale_file.txt"), b"old data").unwrap();
+
+        // 2回目のビルド（no_clean=true）→ 古いファイルが残る
+        run(&cfg, &config_path, true).unwrap();
+
+        assert!(
+            output_dir.join("stale_file.txt").exists(),
+            "--no-clean では stale_file.txt が残るべき"
+        );
+    }
+
+    #[test]
+    fn test_clean_output_dir_removes_files_and_subdirs() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir_all(&output).unwrap();
+
+        // ファイルとサブディレクトリを配置
+        std::fs::write(output.join("file.txt"), b"data").unwrap();
+        std::fs::write(output.join("manifest.json"), b"{}").unwrap();
+        let sub = output.join("assets");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("img.png"), b"img").unwrap();
+
+        clean_output_dir(&output).unwrap();
+
+        // output/ 自体は残る
+        assert!(output.exists(), "output/ ディレクトリ自体は残るべき");
+        // 中身は空
+        let entries: Vec<_> = std::fs::read_dir(&output).unwrap().collect();
+        assert!(entries.is_empty(), "output/ の中身が空になるべき: {:?}", entries);
     }
 }

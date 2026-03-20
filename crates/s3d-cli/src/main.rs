@@ -36,7 +36,11 @@ enum Commands {
     Init,
 
     /// アセットをビルドしてマニフェストを生成する
-    Build,
+    Build {
+        /// ビルド前に output/ をクリーンしない（増分ビルド用）
+        #[arg(long)]
+        no_clean: bool,
+    },
 
     /// 2 つのマニフェストの差分を表示する
     Diff {
@@ -84,9 +88,9 @@ async fn run() -> Result<()> {
             commands::init::run()?;
         }
 
-        Commands::Build => {
+        Commands::Build { no_clean } => {
             let cfg = load_config(&cli.config)?;
-            commands::build::run(&cfg, &cli.config)?;
+            commands::build::run(&cfg, &cli.config, no_clean)?;
         }
 
         Commands::Diff { old, new } => {
