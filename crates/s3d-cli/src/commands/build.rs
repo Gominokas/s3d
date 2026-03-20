@@ -17,6 +17,13 @@
 //! `src/assetsStrategy/` 配下のサブディレクトリを走査し、各ディレクトリの
 //! `strategy.json` を読み込んで `manifest.json` の `strategies` セクションに追加する。
 //! フォルダ名が `strategyAssets("name")` の呼び出し名と一致する。
+//!
+//! ## loader.js の出力
+//! `output/loader.js` に `@statics-lead/loader` のブラウザバンドルを書き出す。
+//! HTML から `<script src="/loader.js">` で読み込める。
+
+/// ビルド時に埋め込む loader.js ブラウザバンドル（IIFE）
+const LOADER_BUNDLE: &[u8] = include_bytes!("../../../../packages/loader/loader.bundle.js");
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -115,13 +122,11 @@ pub fn run(config: &S3dCliConfig, config_path: &Path, no_clean: bool) -> Result<
     }
 
     // ── 5. マニフェスト生成
-    // strategy files のみ hashed_key ベースの URL、それ以外は元の key を使用
+    // ローカルビルド時は CDN URL を埋め込まずルート相対 URL を使用する。
+    // （例: /assets/sushi.abcd1234.glb）
+    // 実際の CDN URL は s3d push 時に rewrite_urls_to_cdn() で書き換えられる。
     let manifest_opts = ManifestOptions {
-        cdn_base_url: config
-            .storage
-            .cdn_base_url
-            .trim_end_matches('/')
-            .to_string(),
+        cdn_base_url: String::new(), // 空 = ルート相対 URL
         version: "1.0.0".to_string(),
         build_time: Some(chrono::Utc::now().to_rfc3339()),
         hashed_keys: hashed_key_set,
@@ -144,6 +149,13 @@ pub fn run(config: &S3dCliConfig, config_path: &Path, no_clean: bool) -> Result<
     let json = manifest_to_json(&manifest).context("マニフェスト JSON 変換エラー")?;
     std::fs::write(&manifest_path, &json)
         .with_context(|| format!("manifest.json の書き込み失敗: {}", manifest_path.display()))?;
+
+    // ── 8. loader.js の書き出し
+    // バイナリに埋め込んだ @statics-lead/loader ブラウザバンドルを output/ に書き出す。
+    // HTML から `<script src="/loader.js">` で直接利用できる。
+    let loader_path = output_dir.join("loader.js");
+    std::fs::write(&loader_path, LOADER_BUNDLE)
+        .with_context(|| format!("loader.js の書き込み失敗: {}", loader_path.display()))?;
 
     // ── サマリ表示
     let total_size: u64 = hashed.iter().map(|a| a.size).sum();
@@ -536,23 +548,24 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         let assets = v["assets"].as_object().unwrap();
 
-        // sushi.glb の URL にはハッシュが入る
+        // ビルド時は相対 URL（CDN ベースなし）
+        // sushi.glb の URL にはハッシュが入り、かつルート相対 URL
         let sushi_url = assets["assets/sushi.glb"]["url"].as_str().unwrap();
         assert!(
-            sushi_url.contains('.') && !sushi_url.ends_with("/assets/sushi.glb"),
-            "sushi.glb URL にハッシュが入るべき: {sushi_url}"
+            sushi_url.starts_with('/') && sushi_url.contains('.') && !sushi_url.ends_with("/assets/sushi.glb"),
+            "sushi.glb URL はルート相対 + ハッシュ付きであるべき: {sushi_url}"
         );
-        // style.css の URL はハッシュなし
+        // style.css の URL はハッシュなし（ルート相対）
         let css_url = assets["assets/style.css"]["url"].as_str().unwrap();
         assert!(
-            css_url.ends_with("/assets/style.css"),
-            "style.css URL にハッシュが入ってはならない: {css_url}"
+            css_url.starts_with('/') && css_url.ends_with("/assets/style.css"),
+            "style.css URL はルート相対 + ハッシュなしであるべき: {css_url}"
         );
-        // index.html の URL はハッシュなし
+        // index.html の URL はハッシュなし（ルート相対）
         let html_url = assets["index.html"]["url"].as_str().unwrap();
         assert!(
-            html_url.ends_with("/index.html"),
-            "index.html URL にハッシュが入ってはならない: {html_url}"
+            html_url.starts_with('/') && html_url.ends_with("/index.html"),
+            "index.html URL はルート相対 + ハッシュなしであるべき: {html_url}"
         );
     }
 
@@ -599,6 +612,61 @@ mod tests {
             "hero.png がマニフェストに含まれるべき: {:?}",
             assets.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_build_outputs_loader_js() {
+        // s3d build が output/loader.js を生成することを確認
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("index.html"), b"<!DOCTYPE html>").unwrap();
+
+        let config_path = dir.path().join("s3d.config.json");
+        let cfg = make_config("src");
+        crate::config::save_config(&config_path, &cfg).unwrap();
+
+        run(&cfg, &config_path, false).unwrap();
+
+        let loader_path = dir.path().join("output/loader.js");
+        assert!(loader_path.exists(), "output/loader.js が生成されていない");
+
+        // loader.js の内容が IIFE バンドルであることを確認
+        let content = std::fs::read(&loader_path).unwrap();
+        assert!(!content.is_empty(), "output/loader.js が空");
+    }
+
+    #[test]
+    fn test_build_manifest_urls_are_relative() {
+        // build 時はマニフェストの URL がルート相対 URL（CDN URL なし）になる
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.js"), b"console.log(1);").unwrap();
+        std::fs::write(src.join("index.html"), b"<!DOCTYPE html>").unwrap();
+
+        let config_path = dir.path().join("s3d.config.json");
+        let cfg = make_config("src");
+        crate::config::save_config(&config_path, &cfg).unwrap();
+
+        run(&cfg, &config_path, false).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("output/manifest.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let assets = v["assets"].as_object().unwrap();
+
+        // 全 URL がルート相対（"/" で始まる）で CDN URL（"https://"）を含まない
+        for (key, asset) in assets {
+            let url = asset["url"].as_str().unwrap();
+            assert!(
+                url.starts_with('/'),
+                "ビルド時の URL はルート相対であるべき: key={key}, url={url}"
+            );
+            assert!(
+                !url.starts_with("https://"),
+                "ビルド時は CDN URL が含まれてはならない: key={key}, url={url}"
+            );
+        }
     }
 
     // ──────────────────────────────────────────────────────────

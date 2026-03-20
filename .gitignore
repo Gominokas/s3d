@@ -1,3 +1,5 @@
 /target
 .env
 output/
+node_modules/
+packages/loader/dist/

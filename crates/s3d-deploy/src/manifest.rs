@@ -99,7 +99,9 @@ fn extract_gltf_dependencies(content: &[u8], hashed_assets: &[HashedAsset]) -> V
 /// マニフェスト構築オプション
 #[derive(Debug, Clone)]
 pub struct ManifestOptions {
-    /// CDN の base URL（末尾スラッシュなし）
+    /// CDN の base URL（末尾スラッシュなし）。
+    /// `build` 時は空文字を渡してルート相対 URL を生成し、
+    /// `push` 時に CDN 絶対 URL へ書き換える。
     pub cdn_base_url: String,
     /// デプロイバージョン（例: `"1.0.0"`）
     pub version: String,
@@ -112,7 +114,10 @@ pub struct ManifestOptions {
 
 /// [`HashedAsset`] のリストから [`DeployManifest`] を構築する。
 ///
-/// - URL = `{cdn_base_url}/{hashed_key}`
+/// - `cdn_base_url` が空文字の場合はルート相対 URL（`/{key}`）を生成する
+///   （`s3d build` 用 — CORS を避けるためローカルでは相対 URL を使用）
+/// - `cdn_base_url` が指定された場合は `{cdn_base_url}/{key}` の絶対 URL を生成する
+///   （`s3d push` が manifest を CDN 用に書き換える際に使用）
 /// - content_type は拡張子から推定
 /// - `.gltf` ファイルは依存関係を自動解析
 pub fn build_manifest(
@@ -134,7 +139,12 @@ pub fn build_manifest(
         } else {
             asset.key.clone()
         };
-        let url = format!("{}/{}", base, url_path);
+        // cdn_base_url が空ならルート相対 URL（例: /assets/sushi.abcd1234.glb）
+        let url = if base.is_empty() {
+            format!("/{}", url_path)
+        } else {
+            format!("{}/{}", base, url_path)
+        };
         let content_type = guess_content_type(&asset.key);
 
         // glTF JSON の依存関係解析
@@ -175,6 +185,22 @@ pub fn build_manifest(
     })
 }
 
+/// `build` 時に生成したルート相対 URL を CDN 絶対 URL に書き換える。
+///
+/// `s3d push` が呼び出す。
+/// 相対 URL (`/` で始まる) のみ書き換え、すでに `http` または `https` で始まる
+/// URL はそのままにする（冪等性のため）。
+pub fn rewrite_urls_to_cdn(manifest: &mut DeployManifest, cdn_base_url: &str) {
+    let base = cdn_base_url.trim_end_matches('/');
+    for entry in manifest.assets.values_mut() {
+        if entry.url.starts_with('/') {
+            // 先頭の `/` を除いたパスを CDN base に結合する
+            let path = entry.url.trim_start_matches('/');
+            entry.url = format!("{}/{}", base, path);
+        }
+    }
+}
+
 /// [`DeployManifest`] を pretty-print JSON 文字列に変換する。
 pub fn manifest_to_json(manifest: &DeployManifest) -> Result<String, ManifestError> {
     Ok(serde_json::to_string_pretty(manifest)?)
@@ -213,7 +239,7 @@ mod tests {
         let mut hashed_keys = HashSet::new();
         hashed_keys.insert("js/main.js".to_string());
         let opts = ManifestOptions {
-            cdn_base_url: "https://cdn.example.com".to_string(),
+            cdn_base_url: String::new(), // build 時は空（ルート相対 URL）
             version: "1.0.0".to_string(),
             build_time: Some("2026-03-20T00:00:00Z".to_string()),
             hashed_keys,
@@ -224,8 +250,8 @@ mod tests {
         assert!(manifest.assets.contains_key("js/main.js"));
 
         let entry = &manifest.assets["js/main.js"];
-        // hashed_keys に含まれるので hashed_key ベースの URL
-        assert_eq!(entry.url, "https://cdn.example.com/js/main.abcd1234.js");
+        // hashed_keys に含まれるので hashed_key ベースのルート相対 URL
+        assert_eq!(entry.url, "/js/main.abcd1234.js");
         // mime_guess は "text/javascript" または "application/javascript" を返す
         assert!(entry.content_type.contains("javascript"));
         assert_eq!(entry.size, 14);
@@ -312,5 +338,86 @@ mod tests {
         let deps = gltf_entry.dependencies.as_ref().unwrap();
         // 依存先の URL は hashed_key ベース
         assert!(deps.contains(&"buffer.bbbb0002.bin".to_string()));
+    }
+
+    #[test]
+    fn build_manifest_with_cdn_base_url() {
+        // cdn_base_url 指定時は絶対 URL が生成される（push シナリオ）
+        let tmp = tempfile::TempDir::new().unwrap();
+        let js_path = tmp.path().join("main.js");
+        std::fs::write(&js_path, b"x").unwrap();
+
+        let assets = vec![make_hashed("js/main.js", "abcd1234", 1, js_path)];
+        let mut hashed_keys = HashSet::new();
+        hashed_keys.insert("js/main.js".to_string());
+        let opts = ManifestOptions {
+            cdn_base_url: "https://cdn.example.com".to_string(),
+            version: "1.0.0".to_string(),
+            build_time: None,
+            hashed_keys,
+        };
+        let manifest = build_manifest(&assets, &opts).unwrap();
+        let entry = &manifest.assets["js/main.js"];
+        assert_eq!(entry.url, "https://cdn.example.com/js/main.abcd1234.js");
+    }
+
+    #[test]
+    fn rewrite_urls_to_cdn_rewrites_relative_urls() {
+        use std::collections::HashMap as HM;
+        use s3d_types::manifest::{AssetEntry, DeployManifest};
+
+        let mut assets = HM::new();
+        assets.insert("app.js".to_string(), AssetEntry {
+            url: "/app.abcd1234.js".to_string(),
+            size: 10,
+            hash: "abcd1234".to_string(),
+            content_type: "application/javascript".to_string(),
+            dependencies: None,
+        });
+        assets.insert("style.css".to_string(), AssetEntry {
+            url: "/style.css".to_string(),
+            size: 5,
+            hash: "00000000".to_string(),
+            content_type: "text/css".to_string(),
+            dependencies: None,
+        });
+        let mut manifest = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-03-20T00:00:00Z".to_string(),
+            assets,
+            strategies: HM::new(),
+        };
+
+        rewrite_urls_to_cdn(&mut manifest, "https://cdn.example.com");
+
+        assert_eq!(manifest.assets["app.js"].url, "https://cdn.example.com/app.abcd1234.js");
+        assert_eq!(manifest.assets["style.css"].url, "https://cdn.example.com/style.css");
+    }
+
+    #[test]
+    fn rewrite_urls_to_cdn_is_idempotent() {
+        use std::collections::HashMap as HM;
+        use s3d_types::manifest::{AssetEntry, DeployManifest};
+
+        let mut assets = HM::new();
+        assets.insert("app.js".to_string(), AssetEntry {
+            url: "https://cdn.example.com/app.abcd1234.js".to_string(),
+            size: 10,
+            hash: "abcd1234".to_string(),
+            content_type: "application/javascript".to_string(),
+            dependencies: None,
+        });
+        let mut manifest = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-03-20T00:00:00Z".to_string(),
+            assets,
+            strategies: HM::new(),
+        };
+
+        // すでに絶対 URL → 書き換えなし（冪等性）
+        rewrite_urls_to_cdn(&mut manifest, "https://cdn.example.com");
+        assert_eq!(manifest.assets["app.js"].url, "https://cdn.example.com/app.abcd1234.js");
     }
 }
