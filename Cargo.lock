@@ -1096,6 +1096,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "s3d-display"
+version = "0.1.0"
+dependencies = [
+ "s3d-loader",
+ "s3d-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "s3d-loader"
 version = "0.1.0"
 dependencies = [
