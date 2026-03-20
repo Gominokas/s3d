@@ -79,10 +79,19 @@ fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>, CollectError> {
     })?))
 }
 
+/// デフォルトで常に除外するパターン
+///
+/// - `.gitkeep` — 空ディレクトリ保持用ファイル
+/// - `assetsStrategy/**` — 戦略定義は manifest に取り込み済みなので CDN に配信しない
+const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
+    "**/.gitkeep",
+    "assetsStrategy/**",
+];
+
 /// アセット収集オプション
 #[derive(Debug, Clone, Default)]
 pub struct CollectOptions {
-    /// 除外する glob パターン（case-insensitive）
+    /// 除外する glob パターン（case-insensitive）。DEFAULT_IGNORE_PATTERNS と合算される
     pub ignore: Vec<String>,
     /// 明示的に含める glob パターン。空の場合はすべて対象
     pub include: Vec<String>,
@@ -100,7 +109,13 @@ pub fn collect(
     root_dir: &Path,
     opts: &CollectOptions,
 ) -> Result<Vec<CollectedAsset>, CollectError> {
-    let ignore_set = build_globset(&opts.ignore)?;
+    // デフォルト除外パターン + ユーザー指定パターンを合算
+    let combined_ignore: Vec<String> = DEFAULT_IGNORE_PATTERNS
+        .iter()
+        .map(|s| s.to_string())
+        .chain(opts.ignore.iter().cloned())
+        .collect();
+    let ignore_set = build_globset(&combined_ignore)?;
     let include_set = build_globset(&opts.include)?;
     let max_bytes = opts.max_file_size.as_deref().and_then(parse_max_file_size);
 
@@ -190,6 +205,56 @@ mod tests {
         let keys: Vec<_> = assets.iter().map(|a| a.key.as_str()).collect();
         assert!(keys.contains(&"a.js"));
         assert!(keys.contains(&"sub/b.css"));
+    }
+
+    #[test]
+    fn collect_excludes_gitkeep_by_default() {
+        let tmp = TempDir::new().unwrap();
+        make_file(tmp.path(), "assets/.gitkeep", b"");
+        make_file(tmp.path(), "assets/main.js", b"x");
+
+        let assets = collect(tmp.path(), &CollectOptions::default()).unwrap();
+        let keys: Vec<_> = assets.iter().map(|a| a.key.as_str()).collect();
+        assert!(!keys.iter().any(|k| k.contains(".gitkeep")), ".gitkeep は除外されるべき: {keys:?}");
+        assert!(keys.contains(&"assets/main.js"));
+    }
+
+    #[test]
+    fn collect_excludes_assets_strategy_by_default() {
+        let tmp = TempDir::new().unwrap();
+        make_file(tmp.path(), "assetsStrategy/strategy.json", b"{}");
+        make_file(tmp.path(), "assetsStrategy/sushi/strategy.json", b"{}");
+        make_file(tmp.path(), "assets/hero.png", b"img");
+
+        let assets = collect(tmp.path(), &CollectOptions::default()).unwrap();
+        let keys: Vec<_> = assets.iter().map(|a| a.key.as_str()).collect();
+        assert!(
+            !keys.iter().any(|k| k.starts_with("assetsStrategy")),
+            "assetsStrategy/ は除外されるべき: {keys:?}"
+        );
+        assert!(keys.contains(&"assets/hero.png"));
+    }
+
+    #[test]
+    fn collect_user_ignore_combined_with_defaults() {
+        let tmp = TempDir::new().unwrap();
+        make_file(tmp.path(), "assets/.gitkeep", b"");
+        make_file(tmp.path(), "assetsStrategy/sushi/strategy.json", b"{}");
+        make_file(tmp.path(), "assets/main.js", b"x");
+        make_file(tmp.path(), "assets/style.css", b"x");
+        make_file(tmp.path(), "assets/main.js.map", b"{}");
+
+        let opts = CollectOptions {
+            ignore: vec!["**/*.map".to_string()],
+            ..Default::default()
+        };
+        let assets = collect(tmp.path(), &opts).unwrap();
+        let keys: Vec<_> = assets.iter().map(|a| a.key.as_str()).collect();
+        assert!(!keys.iter().any(|k| k.contains(".gitkeep")));
+        assert!(!keys.iter().any(|k| k.starts_with("assetsStrategy")));
+        assert!(!keys.iter().any(|k| k.ends_with(".map")));
+        assert!(keys.contains(&"assets/main.js"));
+        assert!(keys.contains(&"assets/style.css"));
     }
 
     #[test]

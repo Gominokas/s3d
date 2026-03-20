@@ -1,14 +1,20 @@
 //! `s3d build` — アセット収集・ハッシュ化・マニフェスト生成コマンド
 //!
-//! `src/` を読み取り、ハッシュ付きファイルを `output/` にコピーして
+//! `src/` を読み取り、ファイルを `output/` にコピーして
 //! `output/manifest.json` を生成する。
+//!
+//! ## ハッシュ付与ロジック
+//! `src/assetsStrategy/**/strategy.json` の `files` フィールドに列挙されたファイルのみ
+//! ハッシュ付きファイル名でコピーする（CDN 長期キャッシュ対象）。
+//! それ以外のファイル（index.html、HTML から直接参照される CSS/JS/画像など）は
+//! ハッシュなしでそのままコピーする。
 //!
 //! ## manifest.json の strategies セクション
 //! `src/assetsStrategy/` 配下のサブディレクトリを走査し、各ディレクトリの
 //! `strategy.json` を読み込んで `manifest.json` の `strategies` セクションに追加する。
 //! フォルダ名が `strategyAssets("name")` の呼び出し名と一致する。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -51,15 +57,35 @@ pub fn run(config: &S3dCliConfig, config_path: &Path) -> Result<()> {
         .with_context(|| format!("アセット収集エラー: {}", src_dir.display()))?;
     println!("  収集: {} ファイル", collected.len().to_string().bold());
 
-    // ── 2. ハッシュ化
+    // ── 2. ハッシュ化（全ファイル対象、コピー時に選別）
     let hashed = hash_assets(&collected, s3d_deploy::hash::DEFAULT_HASH_LENGTH)
         .context("ハッシュ計算エラー")?;
 
-    // ── 3. output/ へハッシュ付きファイルをコピー
+    // ── 3. assetsStrategy の files を収集してハッシュ付与対象セットを構築
+    let strategies_root = src_dir.join("assetsStrategy");
+    let strategies = scan_strategies(&strategies_root)
+        .context("assetsStrategy ディレクトリの走査エラー")?;
+    if !strategies.is_empty() {
+        println!("  strategies: {} 件", strategies.len().to_string().bold());
+    }
+
+    // strategy.json の files に含まれるキーのみハッシュを付与する
+    let hashed_key_set: HashSet<String> = strategies
+        .values()
+        .flat_map(|s| s.files.iter().cloned())
+        .collect();
+
+    // ── 4. output/ へコピー
+    // assetsStrategy の files に含まれるファイル → ハッシュ付きファイル名
+    // それ以外 → 元のキーのまま
     std::fs::create_dir_all(&output_dir)?;
     for asset in &hashed {
-        // hashed_key は "assets/style.abcd1234.css" のような形式
-        let dest = output_dir.join(&asset.hashed_key);
+        let dest_key = if hashed_key_set.contains(&asset.key) {
+            asset.hashed_key.clone()
+        } else {
+            asset.key.clone()
+        };
+        let dest = output_dir.join(&dest_key);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -72,7 +98,8 @@ pub fn run(config: &S3dCliConfig, config_path: &Path) -> Result<()> {
         })?;
     }
 
-    // ── 4. マニフェスト生成
+    // ── 5. マニフェスト生成
+    // strategy files のみ hashed_key ベースの URL、それ以外は元の key を使用
     let manifest_opts = ManifestOptions {
         cdn_base_url: config
             .storage
@@ -81,19 +108,14 @@ pub fn run(config: &S3dCliConfig, config_path: &Path) -> Result<()> {
             .to_string(),
         version: "1.0.0".to_string(),
         build_time: Some(chrono::Utc::now().to_rfc3339()),
+        hashed_keys: hashed_key_set,
     };
     let mut manifest = build_manifest(&hashed, &manifest_opts).context("マニフェスト生成エラー")?;
 
-    // ── 5. strategies セクションを構築 (src/assetsStrategy/ サブディレクトリ走査)
-    let strategies_root = src_dir.join("assetsStrategy");
-    let strategies = scan_strategies(&strategies_root)
-        .context("assetsStrategy ディレクトリの走査エラー")?;
-    if !strategies.is_empty() {
-        println!("  strategies: {} 件", strategies.len().to_string().bold());
-    }
+    // ── 6. strategies セクションをセット
     manifest.strategies = strategies;
 
-    // ── 6. manifest.json の書き込み
+    // ── 7. manifest.json の書き込み
     let manifest_path = config.resolved_manifest_path();
     let manifest_path = if manifest_path.is_absolute() {
         manifest_path
@@ -296,18 +318,19 @@ mod tests {
             "style.css が含まれていない"
         );
 
-        // output/ にハッシュ付きファイルがコピーされている
+        // strategy files がないので app.js / style.css はハッシュなし
         let output_files: Vec<_> = std::fs::read_dir(dir.path().join("output"))
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        // app.abcd1234.js のような形式のファイルが存在する
         assert!(
-            output_files
-                .iter()
-                .any(|f| f.contains("app") && f.ends_with(".js")),
-            "ハッシュ付き app.js が output/ に存在しない: {output_files:?}"
+            output_files.contains(&"app.js".to_string()),
+            "ハッシュなし app.js が output/ にあるべき: {output_files:?}"
+        );
+        assert!(
+            output_files.contains(&"style.css".to_string()),
+            "ハッシュなし style.css が output/ にあるべき: {output_files:?}"
         );
     }
 
@@ -413,5 +436,132 @@ mod tests {
         assert!(!files.is_empty(), "files が空");
         assert_eq!(sushi["cache"].as_bool(), Some(true));
         assert_eq!(sushi["maxAge"].as_str(), Some("7d"));
+    }
+
+    #[test]
+    fn test_build_strategy_files_get_hash_others_dont() {
+        // assetsStrategy files に含まれるファイル → ハッシュあり
+        // それ以外 → ハッシュなし
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let assets_dir = src.join("assets");
+        let strategy_dir = src.join("assetsStrategy").join("sushi");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::create_dir_all(&strategy_dir).unwrap();
+
+        // strategy files に含まれる GLB
+        std::fs::write(assets_dir.join("sushi.glb"), b"glb-data").unwrap();
+        // strategy files に含まれない通常ファイル
+        std::fs::write(src.join("index.html"), b"<!DOCTYPE html>").unwrap();
+        std::fs::write(assets_dir.join("style.css"), b"body{}").unwrap();
+
+        std::fs::write(
+            strategy_dir.join("strategy.json"),
+            r#"{"files":["assets/sushi.glb"],"initial":false,"cache":true}"#,
+        )
+        .unwrap();
+
+        let config_path = dir.path().join("s3d.config.json");
+        let cfg = make_config("src");
+        crate::config::save_config(&config_path, &cfg).unwrap();
+
+        run(&cfg, &config_path).unwrap();
+
+        // output/assets/ 以下を収集
+        let output_assets: Vec<_> = std::fs::read_dir(dir.path().join("output/assets"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let output_root: Vec<_> = std::fs::read_dir(dir.path().join("output"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+
+        // sushi.glb はハッシュ付き
+        assert!(
+            output_assets.iter().any(|f| f.starts_with("sushi.") && f.ends_with(".glb") && f != "sushi.glb"),
+            "sushi.glb にハッシュが付くべき: {:?}", output_assets
+        );
+        // style.css はハッシュなし
+        assert!(
+            output_assets.contains(&"style.css".to_string()),
+            "style.css はハッシュなしのまま: {:?}", output_assets
+        );
+        // index.html はハッシュなし
+        assert!(
+            output_root.contains(&"index.html".to_string()),
+            "index.html はハッシュなしのまま: {:?}", output_root
+        );
+
+        // manifest の URL 確認
+        let content = std::fs::read_to_string(dir.path().join("output/manifest.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let assets = v["assets"].as_object().unwrap();
+
+        // sushi.glb の URL にはハッシュが入る
+        let sushi_url = assets["assets/sushi.glb"]["url"].as_str().unwrap();
+        assert!(
+            sushi_url.contains('.') && !sushi_url.ends_with("/assets/sushi.glb"),
+            "sushi.glb URL にハッシュが入るべき: {sushi_url}"
+        );
+        // style.css の URL はハッシュなし
+        let css_url = assets["assets/style.css"]["url"].as_str().unwrap();
+        assert!(
+            css_url.ends_with("/assets/style.css"),
+            "style.css URL にハッシュが入ってはならない: {css_url}"
+        );
+        // index.html の URL はハッシュなし
+        let html_url = assets["index.html"]["url"].as_str().unwrap();
+        assert!(
+            html_url.ends_with("/index.html"),
+            "index.html URL にハッシュが入ってはならない: {html_url}"
+        );
+    }
+
+    #[test]
+    fn test_build_excludes_gitkeep_and_assets_strategy() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let assets_dir = src.join("assets");
+        let strategy_dir = src.join("assetsStrategy").join("sushi");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::create_dir_all(&strategy_dir).unwrap();
+
+        // .gitkeep と assetsStrategy/ 配下は collect から除外される
+        std::fs::write(assets_dir.join(".gitkeep"), b"").unwrap();
+        std::fs::write(strategy_dir.join("strategy.json"), b"{\"files\":[],\"initial\":false,\"cache\":true}").unwrap();
+        std::fs::write(assets_dir.join("hero.png"), b"png-data").unwrap();
+
+        let config_path = dir.path().join("s3d.config.json");
+        let cfg = make_config("src");
+        crate::config::save_config(&config_path, &cfg).unwrap();
+
+        run(&cfg, &config_path).unwrap();
+
+        let manifest_path = dir.path().join("output/manifest.json");
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let assets = v["assets"].as_object().unwrap();
+
+        // .gitkeep はマニフェストに含まれない
+        assert!(
+            !assets.keys().any(|k| k.contains(".gitkeep")),
+            ".gitkeep がマニフェストに含まれていてはならない: {:?}",
+            assets.keys().collect::<Vec<_>>()
+        );
+        // assetsStrategy/ 配下もマニフェストの assets に含まれない
+        assert!(
+            !assets.keys().any(|k| k.starts_with("assetsStrategy")),
+            "assetsStrategy/ がマニフェストの assets に含まれていてはならない: {:?}",
+            assets.keys().collect::<Vec<_>>()
+        );
+        // hero.png は含まれる
+        assert!(
+            assets.keys().any(|k| k.contains("hero.png")),
+            "hero.png がマニフェストに含まれるべき: {:?}",
+            assets.keys().collect::<Vec<_>>()
+        );
     }
 }
