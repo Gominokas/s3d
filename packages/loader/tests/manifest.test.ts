@@ -16,7 +16,7 @@ const sampleManifest: DeployManifest = {
   buildTime: "2026-03-20T00:00:00Z",
   assets: {
     "assets/sushi.glb": {
-      url: "https://cdn.example.com/assets/sushi.abcd1234.glb",
+      url: "/assets/sushi.abcd1234.glb",
       size: 1024,
       hash: "abcd1234",
       contentType: "model/gltf-binary",
@@ -61,23 +61,45 @@ function mockFetchError(status: number) {
 
 // ─────────────────────────────────────────────────────────────
 // Cache API モック（manifest キャッシュ用）
+// バージョンポインタ + バージョン付きキーの両方に対応
 // ─────────────────────────────────────────────────────────────
 
-function makeCachesMock(initialData?: DeployManifest) {
+function makeCachesMock(initialManifest?: DeployManifest) {
   const store = new Map<string, Response>();
-  if (initialData) {
+
+  if (initialManifest) {
+    const buildTime = initialManifest.buildTime;
+    const versioned = `/manifest.json?v=${encodeURIComponent(buildTime)}`;
+    const ptrKey = "s3d:ptr:/manifest.json";
+
     store.set(
-      "/manifest.json",
-      new Response(JSON.stringify(initialData), {
+      versioned,
+      new Response(JSON.stringify(initialManifest), {
         headers: { "Content-Type": "application/json" },
       })
+    );
+    store.set(
+      ptrKey,
+      new Response(buildTime, { headers: { "Content-Type": "text/plain" } })
     );
   }
 
   const cacheMock = {
-    put: vi.fn(async (url: string, res: Response) => { store.set(url, res.clone()); }),
-    match: vi.fn(async (url: string) => store.get(url)?.clone()),
-    delete: vi.fn(async (url: string) => { store.delete(url); }),
+    put: vi.fn(async (url: string | Request, res: Response) => {
+      const key = typeof url === "string" ? url : url.url;
+      store.set(key, res.clone());
+    }),
+    match: vi.fn(async (url: string | Request) => {
+      const key = typeof url === "string" ? url : url.url;
+      return store.get(key)?.clone();
+    }),
+    delete: vi.fn(async (url: string | Request) => {
+      const key = typeof url === "string" ? url : url.url;
+      store.delete(key);
+    }),
+    keys: vi.fn(async () => {
+      return Array.from(store.keys()).map((k) => ({ url: k } as Request));
+    }),
   };
 
   return {
@@ -114,7 +136,7 @@ describe("fetchManifest — ネットワーク取得", () => {
   });
 });
 
-describe("fetchManifest — Cache API 使用", () => {
+describe("fetchManifest — Cache API 使用（バージョンポインタ方式）", () => {
   it("キャッシュがあればネットワーク fetch をスキップする", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -134,7 +156,8 @@ describe("fetchManifest — Cache API 使用", () => {
     const manifest = await fetchManifest("/manifest.json", true);
     expect(manifest.version).toBe("1.0.0");
     expect(vi.mocked(fetch)).toHaveBeenCalledWith("/manifest.json");
-    expect(cachesMock.cacheMock.put).toHaveBeenCalled();
+    // バージョン付きキーと ポインタの 2 つが put される
+    expect(cachesMock.cacheMock.put).toHaveBeenCalledTimes(2);
   });
 
   it("forceRefresh=true ならキャッシュを無視してネットワーク取得する", async () => {
@@ -145,6 +168,36 @@ describe("fetchManifest — Cache API 使用", () => {
     expect(manifest.version).toBe("1.0.0");
     expect(vi.mocked(fetch)).toHaveBeenCalled();
   });
+
+  it("新しい buildTime のマニフェスト取得後、古いバージョン付きキーが evict される", async () => {
+    // 旧バージョンをキャッシュに入れておく
+    const oldManifest: DeployManifest = {
+      ...sampleManifest,
+      buildTime: "2026-01-01T00:00:00Z",
+    };
+    const newManifest: DeployManifest = {
+      ...sampleManifest,
+      buildTime: "2026-03-20T00:00:00Z",
+    };
+
+    // fetch は新マニフェストを返す
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => newManifest,
+      })
+    );
+    const cachesMock = makeCachesMock(oldManifest);
+    vi.stubGlobal("caches", cachesMock);
+
+    // forceRefresh=true で新しいマニフェストを取得 → 古い versioned key が削除される
+    const manifest = await fetchManifest("/manifest.json", true, true);
+    expect(manifest.buildTime).toBe("2026-03-20T00:00:00Z");
+    // キャッシュに delete が呼ばれているはず（古い versioned key 削除）
+    expect(cachesMock.cacheMock.delete).toHaveBeenCalled();
+  });
 });
 
 describe("evictManifestCache", () => {
@@ -153,7 +206,8 @@ describe("evictManifestCache", () => {
     vi.stubGlobal("caches", cachesMock);
 
     await evictManifestCache("/manifest.json");
-    expect(cachesMock.cacheMock.delete).toHaveBeenCalledWith("/manifest.json");
+    // versioned key が削除される
+    expect(cachesMock.cacheMock.delete).toHaveBeenCalled();
   });
 
   it("Cache API が非サポートでもエラーにならない", async () => {

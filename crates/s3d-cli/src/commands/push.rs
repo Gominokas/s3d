@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use futures::future::join_all;
 use s3d_deploy::diff::{diff_manifests, needs_delete, needs_upload};
+use s3d_deploy::manifest::rewrite_urls_to_cdn;
 use s3d_types::manifest::DeployManifest;
 use s3d_types::plugin::StoragePlugin;
 
@@ -42,7 +43,11 @@ pub async fn run(
             }
         });
 
-    let new_manifest = load_local_manifest(&local_manifest_path)?;
+    let mut new_manifest = load_local_manifest(&local_manifest_path)?;
+
+    // ── ローカルビルド時は相対 URL なので CDN 絶対 URL に書き換える
+    let cdn_url = config.storage.cdn_base_url.trim_end_matches('/');
+    rewrite_urls_to_cdn(&mut new_manifest, cdn_url);
 
     // ── R2 から旧 manifest.json を取得
     let old_manifest = fetch_remote_manifest(storage.as_ref(), "manifest.json").await;
@@ -261,12 +266,12 @@ mod tests {
         std::fs::create_dir_all(&output).unwrap();
         std::fs::write(output.join("app.js"), b"console.log(1);").unwrap();
 
-        // マニフェストを手で作る
+        // ビルドが生成するルート相対 URL を持つマニフェスト
         let mut assets = HashMap::new();
         assets.insert(
             "app.js".to_string(),
             AssetEntry {
-                url: "https://cdn.example.com/app.abcd1234.js".to_string(),
+                url: "/app.abcd1234.js".to_string(), // 相対 URL
                 size: 16,
                 hash: "abcd1234".to_string(),
                 content_type: "application/javascript".to_string(),
@@ -310,14 +315,14 @@ mod tests {
         assets.insert(
             "app.js".to_string(),
             AssetEntry {
-                url: "https://cdn.example.com/app.abcd1234.js".to_string(),
+                url: "/app.abcd1234.js".to_string(), // 相対 URL
                 size: 16,
                 hash: "abcd1234".to_string(),
                 content_type: "application/javascript".to_string(),
                 dependencies: None,
             },
         );
-        let manifest = DeployManifest {
+        let relative_manifest = DeployManifest {
             schema_version: 1,
             version: "1.0.0".to_string(),
             build_time: "2026-01-01T00:00:00Z".to_string(),
@@ -327,7 +332,7 @@ mod tests {
         let manifest_path = dir.path().join("output/manifest.json");
         std::fs::write(
             &manifest_path,
-            serde_json::to_string_pretty(&manifest).unwrap(),
+            serde_json::to_string_pretty(&relative_manifest).unwrap(),
         )
         .unwrap();
 
@@ -335,10 +340,28 @@ mod tests {
         let cfg = make_config();
         crate::config::save_config(&cfg_path, &cfg).unwrap();
 
-        // ストレージに同じ manifest を事前に入れておく → 差分なし
+        // ストレージには CDN 絶対 URL を持つ manifest が入っている（push 済み状態）
+        let mut cdn_assets = HashMap::new();
+        cdn_assets.insert(
+            "app.js".to_string(),
+            s3d_types::manifest::AssetEntry {
+                url: "https://cdn.example.com/app.abcd1234.js".to_string(),
+                size: 16,
+                hash: "abcd1234".to_string(),
+                content_type: "application/javascript".to_string(),
+                dependencies: None,
+            },
+        );
+        let cdn_manifest = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets: cdn_assets,
+            strategies: HashMap::new(),
+        };
         let storage = Arc::new(MockStorage::new());
         {
-            let manifest_json = serde_json::to_vec_pretty(&manifest).unwrap();
+            let manifest_json = serde_json::to_vec_pretty(&cdn_manifest).unwrap();
             storage
                 .put("manifest.json", &manifest_json, "application/json")
                 .await
@@ -355,5 +378,67 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_push_rewrites_relative_urls_to_cdn() {
+        // push 時にルート相対 URL → CDN 絶対 URL に書き換えられることを確認
+        use s3d_types::manifest::{AssetEntry, DeployManifest};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("app.abcd1234.js"), b"console.log(1);").unwrap();
+
+        // ビルドが生成したルート相対 URL を持つマニフェスト
+        let mut assets = HashMap::new();
+        assets.insert(
+            "app.js".to_string(),
+            AssetEntry {
+                url: "/app.abcd1234.js".to_string(), // 相対 URL
+                size: 15,
+                hash: "abcd1234".to_string(),
+                content_type: "application/javascript".to_string(),
+                dependencies: None,
+            },
+        );
+        let relative_manifest = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets,
+            strategies: HashMap::new(),
+        };
+        let manifest_path = dir.path().join("output/manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&relative_manifest).unwrap(),
+        )
+        .unwrap();
+
+        let cfg_path = dir.path().join("s3d.config.json");
+        let cfg = make_config(); // cdn_base_url = "https://cdn.example.com"
+        crate::config::save_config(&cfg_path, &cfg).unwrap();
+
+        let storage = Arc::new(MockStorage::new());
+        let storage: Arc<dyn StoragePlugin> = storage.clone();
+
+        // dry-run=false で実行（アップロードする）
+        run(&cfg, &cfg_path, Some(&manifest_path), false, Arc::clone(&storage))
+            .await
+            .unwrap();
+
+        // アップロードされた manifest.json を取得して URL を確認
+        let uploaded_manifest_bytes = storage.get("manifest.json").await.unwrap();
+        let uploaded_manifest: DeployManifest =
+            serde_json::from_slice(&uploaded_manifest_bytes).unwrap();
+
+        let url = &uploaded_manifest.assets["app.js"].url;
+        assert!(
+            url.starts_with("https://cdn.example.com/"),
+            "push 後の manifest.json の URL は CDN 絶対 URL であるべき: {url}"
+        );
+        assert_eq!(url, "https://cdn.example.com/app.abcd1234.js");
     }
 }

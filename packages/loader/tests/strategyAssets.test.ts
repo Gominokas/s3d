@@ -20,13 +20,13 @@ const sampleManifest: DeployManifest = {
   buildTime: "2026-03-20T00:00:00Z",
   assets: {
     "assets/sushi.glb": {
-      url: "https://cdn.example.com/assets/sushi.abcd1234.glb",
+      url: "/assets/sushi.abcd1234.glb",
       size: 4,
       hash: "abcd1234",
       contentType: "model/gltf-binary",
     },
     "assets/gari.glb": {
-      url: "https://cdn.example.com/assets/gari.efgh5678.glb",
+      url: "/assets/gari.efgh5678.glb",
       size: 4,
       hash: "efgh5678",
       contentType: "model/gltf-binary",
@@ -133,7 +133,7 @@ describe("strategyAssets — 基本動作", () => {
     expect(result.assets["assets/sushi.glb"]).toBeDefined();
 
     const asset = result.assets["assets/sushi.glb"]!;
-    expect(asset.url).toBe("https://cdn.example.com/assets/sushi.abcd1234.glb");
+    expect(asset.url).toBe("/assets/sushi.abcd1234.glb");
     expect(asset.hash).toBe("abcd1234");
     expect(asset.contentType).toBe("model/gltf-binary");
     expect(asset.cached).toBe(false);
@@ -171,7 +171,7 @@ describe("strategyAssets — キャッシュ動作", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     // アセットをあらかじめキャッシュに入れておく
-    const assetUrl = "https://cdn.example.com/assets/sushi.abcd1234.glb";
+    const assetUrl = "/assets/sushi.abcd1234.glb";
     const { cacheMockAssets } = mockCaches(new Map([[assetUrl, glbData]]));
 
     const result = await strategyAssets("sushi", { cache: true });
