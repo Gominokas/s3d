@@ -1,6 +1,7 @@
-# s3d — Static 3D Asset Deployment
+# s3d — Serverless Static Asset Delivery Framework
 
-**s3d** は 3D アセット（`.glb`, `.gltf`, `.ktx2` 等）の CDN デプロイを自動化する Rust ツールチェーンです。
+**s3d** は静的ファイル（画像・JS・CSS・3D モデルなど）を CDN へ自動デプロイし、
+フロントエンドから戦略的に配信するための Rust ツールチェーンです。
 
 ## クレート構成
 
@@ -19,10 +20,11 @@
                                  │
                                  ▼
                          manifest.json
+                         (assets + strategies)
                                  │
                          s3d-loader (browser)
                                  │
-                         assetsStrategy / strategyAssets
+                         strategyAssets("name")
 ```
 
 ## 開発者体験 — プロジェクト作成から配信まで
@@ -38,8 +40,8 @@ s3d init
 cp .env.example .env
 # CLOUDFLARE_R2_ACCESS_KEY_ID / CLOUDFLARE_R2_SECRET_ACCESS_KEY を設定
 
-# 3. src/ にファイルを配置
-#    （s3d init で src/index.html, src/assets/, src/assetsStrategy/strategy.json が生成済み）
+# 3. src/ にファイルを配置し、戦略を定義
+#    （s3d init で src/index.html, src/assets/, src/assetsStrategy/sushi/ などが生成済み）
 
 # 4. ビルド（マニフェスト生成 + ハッシュ付きファイルを output/ にコピー）
 s3d build
@@ -59,8 +61,13 @@ my-service/
 ├─ .gitignore                  (/target, .env, output/ を含む)
 ├─ src/
 │   ├─ index.html              ← スキャフォールドテンプレート
-│   ├─ assetsStrategy/
-│   │   └─ strategy.json       ← 配信戦略の定義
+│   ├─ assetsStrategy/         ← 1アセットグループ = 1サブディレクトリ
+│   │   ├─ sushi/
+│   │   │   └─ strategy.json   ← strategyAssets("sushi") と一致
+│   │   ├─ gari/
+│   │   │   └─ strategy.json   ← strategyAssets("gari") と一致
+│   │   └─ example/
+│   │       └─ strategy.json
 │   └─ assets/                 ← 自由に配置
 │       ├─ style.css
 │       ├─ main.js
@@ -81,29 +88,28 @@ my-service/
 <link rel="stylesheet" href="assets/style.css" />
 ```
 
-**SEO 不要の重いアセット（クローラはスキップ、CDN から非同期取得）:**
+**SEO 不要の重いアセット（名前で呼ぶ・必要なものだけ取得・キャッシュ共有）:**
 
 ```html
-<script type="module">
-  const { strategyAssets } = await import('./assetsStrategy/loader.js');
-  const assets = await strategyAssets();
-  // assets.get('assets/models/shop.glb') → CDN URL
+<script>
+  // 必要なアセットだけ名前で呼ぶ
+  const sushi = await strategyAssets("sushi");
+  const gari  = await strategyAssets("gari");
+  // 呼ばなければ取得しない
+  // 別ページで同じ名前を呼べばキャッシュヒット
 </script>
 ```
 
-### `src/assetsStrategy/strategy.json` の例
+### `src/assetsStrategy/<name>/strategy.json` の例
+
+各サブディレクトリ名が `strategyAssets("name")` の呼び出し名と一致します。
 
 ```json
 {
-  "initial": {
-    "sources": ["assets/style.css", "assets/main.js", "assets/hero.png"],
-    "cache": true
-  },
-  "cdn": {
-    "files": ["assets/models/**", "assets/detail-*.png"],
-    "cache": true,
-    "maxAge": "7d"
-  },
+  "files": ["assets/sushi.glb"],
+  "initial": false,
+  "cache": true,
+  "maxAge": "7d",
   "reload": {
     "trigger": "manifest-change",
     "strategy": "diff"
@@ -111,7 +117,45 @@ my-service/
 }
 ```
 
-ファイル配置は自由。戦略側で「最初に送るもの」「後から送るもの」を宣言します。
+フォルダ名とアセットは自由に設計できます。戦略側で「いつ取得するか」「キャッシュするか」「差分更新するか」を宣言します。
+
+## manifest.json の構造
+
+`s3d build` が生成する `manifest.json` には `strategies` セクションが含まれます。
+
+```json
+{
+  "schemaVersion": 1,
+  "version": "1.0.0",
+  "buildTime": "2026-03-20T00:00:00Z",
+  "assets": {
+    "assets/sushi.glb": {
+      "url": "https://cdn.example.com/assets/sushi.a1b2c3d4.glb",
+      "size": 204800,
+      "hash": "a1b2c3d4",
+      "contentType": "model/gltf-binary"
+    }
+  },
+  "strategies": {
+    "sushi": {
+      "files": ["assets/sushi.glb"],
+      "initial": false,
+      "cache": true,
+      "maxAge": "7d",
+      "reload": { "trigger": "manifest-change", "strategy": "diff" }
+    },
+    "gari": {
+      "files": ["assets/gari.glb"],
+      "initial": false,
+      "cache": true,
+      "maxAge": "7d",
+      "reload": { "trigger": "manifest-change", "strategy": "diff" }
+    }
+  }
+}
+```
+
+`s3d-loader` は `strategies[name]` を参照し、対象ファイルだけを CDN から取得します。
 
 ## CLI コマンド
 
@@ -127,7 +171,7 @@ my-service/
 
 ```json
 {
-  "project": "my-3d-project",
+  "project": "my-service",
   "storage": {
     "provider": "cloudflare-r2",
     "bucket": "my-assets-bucket",
@@ -135,9 +179,13 @@ my-service/
     "account_id": "your_cloudflare_account_id"
   },
   "src_dir": "src",
-  "output_dir": "output"
+  "output_dir": "output",
+  "plugins": []
 }
 ```
+
+> `plugins` フィールドは将来のプラグイン機構のために予約された空配列です。  
+> 現時点では何も設定する必要はありません。
 
 ## 環境変数
 
