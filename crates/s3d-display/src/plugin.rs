@@ -128,7 +128,7 @@ mod tests {
         AssetsStrategyConfig, CdnStrategyConfig, InitialConfig, ReloadConfig, ReloadStrategy,
         ReloadTrigger,
     };
-    use s3d_types::config::{DeployConfig, DisplayConfig, LoaderDisplayConfig, S3dConfig};
+    use s3d_types::config::{DisplayConfig, LoaderDisplayConfig, S3dConfig};
     use s3d_types::manifest::{AssetEntry, DeployManifest};
 
     use crate::config::{DisplayProjectConfig, IframeConfig, IframePartRule};

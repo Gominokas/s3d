@@ -159,9 +159,7 @@ impl DisplayProjectConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use s3d_loader::{
-        CdnStrategyConfig, InitialConfig, ReloadConfig, ReloadStrategy, ReloadTrigger,
-    };
+    use s3d_loader::{ReloadStrategy, ReloadTrigger};
 
     fn sample_json() -> String {
         serde_json::json!({

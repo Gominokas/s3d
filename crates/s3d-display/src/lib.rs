@@ -40,7 +40,7 @@ pub mod template;
 
 // 主要な型を再エクスポート
 pub use config::{ConfigError, DisplayProjectConfig, IframeConfig, IframePartRule};
-pub use iframe::{partition_page, IframePartition, Part};
+pub use iframe::{partition_page, replace_iframe_markers, IframeMarker, IframePartition, Part};
 pub use output::{collect_output_files, write_output_files, OutputError, OutputFile};
 pub use plugin::PlainHtmlDisplay;
 pub use template::{render_parent_page, render_part_page, TemplateOptions};
@@ -79,33 +79,9 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    use s3d_loader::{
-        AssetsStrategyConfig, CdnStrategyConfig, InitialConfig, ReloadConfig, ReloadStrategy,
-        ReloadTrigger,
-    };
     use s3d_types::config::{DisplayConfig, LoaderDisplayConfig, S3dConfig};
     use s3d_types::manifest::{AssetEntry, DeployManifest};
     use s3d_types::plugin::{DisplayPlugin, RenderContext};
-
-    fn sample_strategy() -> AssetsStrategyConfig {
-        AssetsStrategyConfig {
-            initial: InitialConfig {
-                sources: vec!["js/main.js".to_string()],
-                cache: true,
-                fallback: None,
-            },
-            cdn: CdnStrategyConfig {
-                files: vec!["models/**".to_string()],
-                cache: true,
-                max_age: None,
-            },
-            reload: ReloadConfig {
-                trigger: ReloadTrigger::ManifestChange,
-                strategy: ReloadStrategy::Diff,
-                interval_ms: None,
-            },
-        }
-    }
 
     fn sample_manifest() -> DeployManifest {
         let mut assets = HashMap::new();
