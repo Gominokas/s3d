@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "build:bundle": "esbuild src/index.ts --bundle --format=iife --global-name=S3dLoader --outfile=loader.bundle.js --platform=browser --minify",
+    "build:bundle": "esbuild src/index.ts --bundle --format=esm --outfile=loader.bundle.js --platform=browser --minify",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
