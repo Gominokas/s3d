@@ -163,6 +163,30 @@ pub async fn run(
         }
     }
 
+    // ── loader.js をアップロード（manifest 外の固定ファイル）
+    // `s3d build` が output/loader.js を生成するが、manifest には含まれない。
+    // push 時に毎回アップロードして CDN 上で 404 にならないようにする。
+    let loader_path = output_dir.join("loader.js");
+    if loader_path.exists() {
+        match std::fs::read(&loader_path) {
+            Ok(data) => {
+                match storage
+                    .put("loader.js", &data, "application/javascript")
+                    .await
+                {
+                    Ok(_) => println!("  {} loader.js をアップロードしました", "↑".green()),
+                    Err(e) => eprintln!("  {} loader.js アップロード失敗: {}", "✘".red(), e.message),
+                }
+            }
+            Err(e) => eprintln!("  {} loader.js 読み込み失敗: {e}", "✘".red()),
+        }
+    } else {
+        eprintln!(
+            "  {} output/loader.js が見つかりません（s3d build を先に実行してください）",
+            "⚠".yellow()
+        );
+    }
+
     // ── manifest.json をアップロード
     let manifest_json =
         serde_json::to_vec_pretty(&new_manifest).context("manifest JSON 変換失敗")?;
@@ -463,5 +487,148 @@ mod tests {
             "push 後の manifest.json の URL は CDN 絶対 URL であるべき: {url}"
         );
         assert_eq!(url, "https://cdn.example.com/app.abcd1234.js");
+    }
+
+    #[tokio::test]
+    async fn test_push_uploads_loader_js() {
+        // output/loader.js が存在するとき push がそれをアップロードすることを確認
+        use s3d_types::manifest::{AssetEntry, DeployManifest};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir_all(&output).unwrap();
+
+        // loader.js を配置（build が生成するものを模倣）
+        let loader_content = b"export{strategyAssets}";
+        std::fs::write(output.join("loader.js"), loader_content).unwrap();
+
+        // ハッシュ付きアセットファイルも配置
+        std::fs::write(output.join("app.abcd1234.js"), b"console.log(1);").unwrap();
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "app.js".to_string(),
+            AssetEntry {
+                url: "/app.abcd1234.js".to_string(),
+                size: 15,
+                hash: "abcd1234".to_string(),
+                content_type: "application/javascript".to_string(),
+                dependencies: None,
+            },
+        );
+        let manifest = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets,
+            strategies: HashMap::new(),
+        };
+        let manifest_path = output.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let cfg_path = dir.path().join("s3d.config.json");
+        let cfg = make_config();
+        crate::config::save_config(&cfg_path, &cfg).unwrap();
+
+        let storage = Arc::new(MockStorage::new());
+        let storage_dyn: Arc<dyn StoragePlugin> = storage.clone();
+
+        run(&cfg, &cfg_path, Some(&manifest_path), false, Arc::clone(&storage_dyn))
+            .await
+            .unwrap();
+
+        // loader.js がアップロードされている
+        let uploaded = storage.get("loader.js").await
+            .expect("loader.js がストレージにアップロードされていない");
+        assert_eq!(uploaded, loader_content, "loader.js の内容が一致しない");
+    }
+
+    #[tokio::test]
+    async fn test_push_no_changes_still_uploads_loader_js() {
+        // アセットに変更がない（no changes）ときでも loader.js はアップロードされない
+        // （変更なし早期 return するため。loader.js は差分があるときのみアップロード）
+        // ※ "変更なし" で早期 return する場合は loader.js もスキップされる仕様
+        //   → これは意図通りの動作（変更なし = 全ファイル同一 = loader.js も同一）
+        use s3d_types::manifest::{AssetEntry, DeployManifest};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("output");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("loader.js"), b"export{strategyAssets}").unwrap();
+
+        let mut assets = HashMap::new();
+        assets.insert(
+            "app.js".to_string(),
+            AssetEntry {
+                url: "/app.abcd1234.js".to_string(),
+                size: 16,
+                hash: "abcd1234".to_string(),
+                content_type: "application/javascript".to_string(),
+                dependencies: None,
+            },
+        );
+        let relative_manifest = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets: assets.clone(),
+            strategies: HashMap::new(),
+        };
+        let manifest_path = output.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&relative_manifest).unwrap(),
+        )
+        .unwrap();
+
+        let cfg_path = dir.path().join("s3d.config.json");
+        let cfg = make_config();
+        crate::config::save_config(&cfg_path, &cfg).unwrap();
+
+        // リモートに CDN URL で同じ内容の manifest が既にある（変更なし）
+        let mut cdn_assets = HashMap::new();
+        cdn_assets.insert(
+            "app.js".to_string(),
+            s3d_types::manifest::AssetEntry {
+                url: "https://cdn.example.com/app.abcd1234.js".to_string(),
+                size: 16,
+                hash: "abcd1234".to_string(),
+                content_type: "application/javascript".to_string(),
+                dependencies: None,
+            },
+        );
+        let cdn_manifest = DeployManifest {
+            schema_version: 1,
+            version: "1.0.0".to_string(),
+            build_time: "2026-01-01T00:00:00Z".to_string(),
+            assets: cdn_assets,
+            strategies: HashMap::new(),
+        };
+        let storage = Arc::new(MockStorage::new());
+        {
+            let manifest_json = serde_json::to_vec_pretty(&cdn_manifest).unwrap();
+            storage
+                .put("manifest.json", &manifest_json, "application/json")
+                .await
+                .unwrap();
+        }
+        let storage_dyn: Arc<dyn StoragePlugin> = storage.clone();
+
+        // 変更なし → 早期 return → loader.js もアップロードされない（仕様通り）
+        run(&cfg, &cfg_path, Some(&manifest_path), false, Arc::clone(&storage_dyn))
+            .await
+            .unwrap();
+
+        // loader.js はアップロードされていない（変更なし早期 return のため）
+        assert!(
+            storage.get("loader.js").await.is_err(),
+            "変更なし時は loader.js もアップロードされない（早期 return）"
+        );
     }
 }
