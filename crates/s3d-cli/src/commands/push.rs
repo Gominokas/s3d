@@ -83,6 +83,11 @@ pub async fn run(
     }
 
     // ── アップロード（並列）
+    // `to_upload` の各 key は manifest の論理キー（例: "assets/cake-3d.bin"）。
+    // build 時にハッシュ付きファイル名でコピーされているため、
+    // 実際の output/ 内のファイルは manifest.assets[key].url のパス部分になる。
+    // rewrite_urls_to_cdn 後は URL = "https://cdn.example.com/assets/cake-3d.30e14955.bin"
+    // → パス部分 "assets/cake-3d.30e14955.bin" でファイルを探す。
     let concurrency = 8usize;
     let upload_keys: Vec<String> = to_upload.iter().map(|s| s.to_string()).collect();
     let total = upload_keys.len();
@@ -100,14 +105,32 @@ pub async fn run(
                 let total = total;
 
                 async move {
-                    // manifest からハッシュ付きキーを探す（URL から元のキー特定）
-                    // ローカルファイルは output_dir/key として読み込む
-                    let file_path = output_dir.join(&key);
+                    let entry = new_manifest.assets.get(&key);
+
+                    // manifest.assets[key].url からファイルパスを解決する。
+                    // rewrite_urls_to_cdn 後の URL 例:
+                    //   "https://cdn.example.com/assets/cake-3d.30e14955.bin"
+                    // の場合、パス部分 "assets/cake-3d.30e14955.bin" を使う。
+                    // 相対 URL "/assets/cake-3d.30e14955.bin" の場合も先頭 '/' を除去して使う。
+                    let local_path = entry.and_then(|e| {
+                        let url = &e.url;
+                        // http(s):// の場合はパス部分のみ取り出す
+                        if url.starts_with("http://") || url.starts_with("https://") {
+                            url.splitn(4, '/').nth(3).map(|p| p.to_string())
+                        } else {
+                            // ルート相対 URL ("/assets/...") の場合
+                            Some(url.trim_start_matches('/').to_string())
+                        }
+                    });
+
+                    let file_path = match local_path {
+                        Some(ref p) => output_dir.join(p),
+                        None => output_dir.join(&key), // フォールバック: 論理キーで探す
+                    };
+
                     match std::fs::read(&file_path) {
                         Ok(data) => {
-                            let content_type = new_manifest
-                                .assets
-                                .get(&key)
+                            let content_type = entry
                                 .map(|e| e.content_type.as_str())
                                 .unwrap_or("application/octet-stream");
                             match storage.put(&key, &data, content_type).await {
@@ -123,7 +146,7 @@ pub async fn run(
                             }
                         }
                         Err(e) => {
-                            eprintln!("  {} ファイル読み込み失敗 {key}: {e}", "✘".red());
+                            eprintln!("  {} ファイル読み込み失敗 {key} ({}): {e}", "✘".red(), file_path.display());
                         }
                     }
                 }
