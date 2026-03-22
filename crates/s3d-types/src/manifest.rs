@@ -29,10 +29,13 @@ pub struct StrategyReload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyEntry {
-    /// 対象ファイル一覧 (src/assets/ 相対パス)
+    /// CDN 経由で配信するファイル一覧（ハッシュ付きでコピーされる）
     pub files: Vec<String>,
-    /// 初期ロード対象かどうか
-    pub initial: bool,
+    /// 初期表示ファイルのパス（ハッシュなしでコピーされる）。
+    /// 省略時は初期表示なし。
+    /// 例: "assets/placeholder.png"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial: Option<String>,
     /// キャッシュを有効にするか
     pub cache: bool,
     /// キャッシュの最大有効期間 (例: "7d")

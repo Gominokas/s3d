@@ -31,10 +31,13 @@ export interface StrategyReload {
 
 /** manifest.json の strategies[name] エントリ（Rust: StrategyEntry） */
 export interface StrategyEntry {
-  /** 対象ファイルのキー一覧（manifest.assets のキーと一致） */
+  /** CDN 経由で配信するファイルのキー一覧（manifest.assets のキーと一致） */
   files: string[];
-  /** 初期ロード対象かどうか */
-  initial: boolean;
+  /**
+   * 初期表示ファイルのパス（ハッシュなしでコピーされる）。
+   * 省略時は初期表示なし。例: "assets/placeholder.png"
+   */
+  initial?: string;
   /** Cache API を使うか */
   cache: boolean;
   /** キャッシュ最大有効期間（例: "7d"） */
