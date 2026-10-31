@@ -107,7 +107,7 @@ my-service/
 ```json
 {
   "files": ["assets/sushi.glb"],
-  "initial": false,
+  "initial": "assets/sushi.png",
   "cache": true,
   "maxAge": "7d",
   "reload": {
@@ -139,14 +139,13 @@ my-service/
   "strategies": {
     "sushi": {
       "files": ["assets/sushi.glb"],
-      "initial": false,
+      "initial": "assets/sushi.png",
       "cache": true,
       "maxAge": "7d",
       "reload": { "trigger": "manifest-change", "strategy": "diff" }
     },
     "gari": {
       "files": ["assets/gari.glb"],
-      "initial": false,
       "cache": true,
       "maxAge": "7d",
       "reload": { "trigger": "manifest-change", "strategy": "diff" }
