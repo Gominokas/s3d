@@ -202,7 +202,7 @@ pub(crate) fn scaffold_src(project: &str, base_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&sushi_dir)?;
     let sushi_strategy_json = r#"{
   "files": ["assets/sushi.glb"],
-  "initial": false,
+  "initial": "assets/sushi.png",
   "cache": true,
   "maxAge": "7d",
   "reload": {
@@ -232,9 +232,10 @@ pub(crate) fn scaffold_src(project: &str, base_dir: &Path) -> Result<()> {
 
     SEO 不要の重いアセットは strategyAssets() で非同期取得する:
     <script type="module">
-      const {{ strategyAssets }} = await import('./assetsStrategy/loader.js');
-      const assets = await strategyAssets();
-      // assets.get('assets/models/shop.glb') → CDN URL
+      const {{ strategyAssets }} = await import('./loader.js');
+      const result = await strategyAssets('sushi');
+      // result.assets['assets/sushi.glb'].url  → 配信 URL
+      // result.assets['assets/sushi.glb'].data → ArrayBuffer
     </script>
   -->
 
@@ -324,6 +325,25 @@ mod tests {
     }
 
     #[test]
+    fn test_index_html_uses_current_loader_api() {
+        // 生成される利用例が現行ローダー API（名前必須・配置は output/loader.js）に合っていること
+        let dir = make_and_scaffold("proj", CdnProvider::CloudflareR2);
+        let html = std::fs::read_to_string(dir.path().join("src/index.html")).unwrap();
+        assert!(
+            html.contains("import('./loader.js')"),
+            "loader.js の import パスが現行の配置と違う"
+        );
+        assert!(
+            html.contains("strategyAssets('sushi')"),
+            "strategyAssets は戦略名を渡す現行 API であるべき"
+        );
+        assert!(
+            !html.contains("assetsStrategy/loader.js"),
+            "旧配置 assetsStrategy/loader.js が残っている"
+        );
+    }
+
+    #[test]
     fn test_strategy_json_valid() {
         let dir = make_and_scaffold("proj", CdnProvider::CloudflareR2);
         let content =
@@ -405,7 +425,11 @@ mod tests {
         let content = std::fs::read_to_string(&sushi_path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(v.get("files").is_some(), "files フィールドがない");
-        assert!(v.get("initial").is_some(), "initial フィールドがない");
+        // initial は現行スキーマでは仮画像のパス（文字列）。旧形式の bool は不可
+        assert!(
+            v.get("initial").and_then(|i| i.as_str()).is_some(),
+            "initial は文字列（仮画像パス）であるべき"
+        );
         assert!(v.get("cache").is_some(), "cache フィールドがない");
         let files = v["files"].as_array().unwrap();
         assert!(!files.is_empty(), "files が空");
