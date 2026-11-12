@@ -219,6 +219,123 @@ describe("strategyAssets — コールバック", () => {
   });
 });
 
+describe("strategyAssets — 並列取得", () => {
+  // 6 ファイルの strategy（並列数の検証用）
+  const manyManifest: DeployManifest = {
+    schemaVersion: 1,
+    version: "1.0.0",
+    buildTime: "2026-03-20T00:00:00Z",
+    assets: Object.fromEntries(
+      Array.from({ length: 6 }, (_, i) => [
+        `assets/file${i}.glb`,
+        {
+          url: `/assets/file${i}.hash${i}.glb`,
+          size: 4,
+          hash: `hash${i}`,
+          contentType: "model/gltf-binary",
+        },
+      ])
+    ),
+    strategies: {
+      many: {
+        files: Array.from({ length: 6 }, (_, i) => `assets/file${i}.glb`),
+        initial: false,
+        cache: true,
+      },
+    },
+  };
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** 遅延つき fetch モック。同時実行数を記録する */
+  function mockDelayedFetch(delayMs: number, failUrl?: string) {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if ((url as string).endsWith(".json")) {
+        return { ok: true, status: 200, json: async () => manyManifest, body: null };
+      }
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await sleep(delayMs);
+      inFlight -= 1;
+      if (failUrl && url === failUrl) {
+        return { ok: false, status: 500, statusText: "Internal Server Error", body: null };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "Content-Length": "4" }),
+        arrayBuffer: async () => glbData,
+        body: null,
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { getMaxInFlight: () => maxInFlight, fetchMock };
+  }
+
+  it("concurrency 2 では同時実行数が 2 以下になる", async () => {
+    const { getMaxInFlight } = mockDelayedFetch(20);
+
+    const result = await strategyAssets("many", { cache: false, concurrency: 2 });
+
+    expect(Object.keys(result.assets)).toHaveLength(6);
+    expect(getMaxInFlight()).toBeLessThanOrEqual(2);
+    expect(getMaxInFlight()).toBeGreaterThan(1);
+  });
+
+  it("concurrency 1 では逐次取得（同時実行数 1）になる", async () => {
+    const { getMaxInFlight } = mockDelayedFetch(10);
+
+    const result = await strategyAssets("many", { cache: false, concurrency: 1 });
+
+    expect(Object.keys(result.assets)).toHaveLength(6);
+    expect(getMaxInFlight()).toBe(1);
+  });
+
+  it("完了順がバラバラでも全ファイルがそろう", async () => {
+    // ファイルごとに遅延を変えて完了順をシャッフルする
+    let inFlight = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if ((url as string).endsWith(".json")) {
+          return { ok: true, status: 200, json: async () => manyManifest, body: null };
+        }
+        const idx = Number(/file(\d)/.exec(url)?.[1] ?? 0);
+        inFlight += 1;
+        await sleep((5 - idx) * 10);
+        inFlight -= 1;
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Length": "4" }),
+          arrayBuffer: async () => glbData,
+          body: null,
+        };
+      })
+    );
+
+    const completed: number[] = [];
+    const result = await strategyAssets("many", {
+      cache: false,
+      concurrency: 3,
+      onProgress: (e) => completed.push(e.completedFiles),
+    });
+
+    expect(Object.keys(result.assets)).toHaveLength(6);
+    expect(Math.max(...completed)).toBe(6);
+  });
+
+  it("1件でも失敗すれば strategy 全体が失敗する（従来と同じ意味）", async () => {
+    mockDelayedFetch(5, "/assets/file2.hash2.glb");
+
+    await expect(
+      strategyAssets("many", { cache: false, concurrency: 3 })
+    ).rejects.toThrow("アセット取得に失敗しました");
+  });
+});
+
 describe("strategyAssets — manifest URL オプション", () => {
   it("manifestUrl オプションが fetch に渡される", async () => {
     const fetchMock = vi.fn(async (url: string) => {

@@ -36,6 +36,8 @@ export type {
 const DEFAULT_MANIFEST_URL = "/manifest.json";
 const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_RETRIES = 2;
+const DEFAULT_CONCURRENCY = 5;
+const MAX_CONCURRENCY = 10;
 
 /**
  * 指定した strategy 名のアセットを非同期で取得する。
@@ -62,6 +64,7 @@ export async function strategyAssets(
     onComplete,
     timeout = DEFAULT_TIMEOUT,
     retries = DEFAULT_RETRIES,
+    concurrency = DEFAULT_CONCURRENCY,
   } = options;
 
   // ── 1. manifest.json 取得
@@ -79,10 +82,20 @@ export async function strategyAssets(
   const totalFiles = strategy.files.length;
   const resultAssets: Record<string, AssetData> = {};
 
-  // ── 3〜7. ファイルごとに取得
-  for (let i = 0; i < strategy.files.length; i++) {
-    const fileKey = strategy.files[i]!;
+  // 並列数は 1〜10 にクランプする。1 は従来の逐次取得と等価。
+  const workerCount = Math.min(
+    MAX_CONCURRENCY,
+    Math.max(1, Math.floor(concurrency) || DEFAULT_CONCURRENCY)
+  );
 
+  // ── 3〜7. ワーカープールで並列取得
+  // JS はシングルスレッドなので、共有カーソル `next` のインクリメントは
+  // await の合間にだけ起き、ワーカー同士で同じファイルを取り合うことはない。
+  // 進捗の completedFiles は「完了したファイル数」の共有カウンタ。
+  let next = 0;
+  let completed = 0;
+
+  const loadOne = async (fileKey: string): Promise<void> => {
     // manifest.assets からエントリを解決
     const entry = manifest.assets[fileKey];
     if (!entry) {
@@ -116,8 +129,9 @@ export async function strategyAssets(
       data = await fetchAsset(url, {
         timeout,
         retries,
-        onProgress,
-        completedFiles: i,
+        // exactOptionalPropertyTypes: true のため、undefined の onProgress は渡さない
+        ...(onProgress ? { onProgress } : {}),
+        completedFiles: completed,
         totalFiles,
       });
 
@@ -130,13 +144,28 @@ export async function strategyAssets(
     resultAssets[fileKey] = { url, data, hash, contentType, cached };
 
     // 進捗: ファイル完了時にも報告
+    completed += 1;
     onProgress?.({
       loaded: data.byteLength,
       total: data.byteLength,
-      completedFiles: i + 1,
+      completedFiles: completed,
       totalFiles,
     });
-  }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (next < strategy.files.length) {
+      const fileKey = strategy.files[next]!;
+      next += 1;
+      await loadOne(fileKey);
+    }
+  };
+
+  // Promise.all は最初の失敗で reject するので、従来の
+  // 「1件でも失敗したら strategy 全体が失敗する」と同じ意味になる。
+  await Promise.all(
+    Array.from({ length: Math.min(workerCount, totalFiles) }, () => worker())
+  );
 
   const result: StrategyAssetsResult = {
     name,

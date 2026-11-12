@@ -101,6 +101,11 @@ export interface FetchOptions {
    * リトライ回数。デフォルト: 2
    */
   retries?: number;
+  /**
+   * 並列取得数。デフォルト: 5（1〜10 にクランプ）。
+   * 1 を指定すると従来の逐次取得と等価になる。
+   */
+  concurrency?: number;
 }
 
 /** strategyAssets() が返す各ファイルのデータ */
