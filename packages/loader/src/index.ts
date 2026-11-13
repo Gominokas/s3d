@@ -65,6 +65,7 @@ export async function strategyAssets(
     timeout = DEFAULT_TIMEOUT,
     retries = DEFAULT_RETRIES,
     concurrency = DEFAULT_CONCURRENCY,
+    signal,
   } = options;
 
   // ── 1. manifest.json 取得
@@ -129,8 +130,9 @@ export async function strategyAssets(
       data = await fetchAsset(url, {
         timeout,
         retries,
-        // exactOptionalPropertyTypes: true のため、undefined の onProgress は渡さない
+        // exactOptionalPropertyTypes: true のため、undefined の onProgress / signal は渡さない
         ...(onProgress ? { onProgress } : {}),
+        ...(signal ? { signal } : {}),
         completedFiles: completed,
         totalFiles,
       });
@@ -155,6 +157,8 @@ export async function strategyAssets(
 
   const worker = async (): Promise<void> => {
     while (next < strategy.files.length) {
+      // 次のファイルを取り出す前に中断を確認する（協調的キャンセル）
+      signal?.throwIfAborted();
       const fileKey = strategy.files[next]!;
       next += 1;
       await loadOne(fileKey);

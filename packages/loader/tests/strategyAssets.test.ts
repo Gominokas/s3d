@@ -336,6 +336,107 @@ describe("strategyAssets — 並列取得", () => {
   });
 });
 
+describe("strategyAssets — 中断", () => {
+  it("開始前に abort すればアセット fetch なしで AbortError になる", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if ((url as string).endsWith(".json")) {
+        return { ok: true, status: 200, json: async () => sampleManifest, body: null };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "Content-Length": "4" }),
+        arrayBuffer: async () => glbData,
+        body: null,
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      strategyAssets("combo", { cache: false, signal: controller.signal })
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    // manifest 取得は行うが、アセット fetch は呼ばれない
+    const assetCalls = fetchMock.mock.calls.filter(
+      ([url]) => !(url as string).endsWith(".json")
+    );
+    expect(assetCalls).toHaveLength(0);
+  });
+
+  it("取得中に abort すれば AbortError になり、再試行しない", async () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const assetCalls = new Map<string, number>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { signal?: AbortSignal }) => {
+        if ((url as string).endsWith(".json")) {
+          return { ok: true, status: 200, json: async () => sampleManifest, body: null };
+        }
+        assetCalls.set(url, (assetCalls.get(url) ?? 0) + 1);
+        // 遅延させて abort のタイミングを作る。本物の fetch と同じく、
+        // シグナルが abort されたら AbortError で失敗する。
+        await sleep(50);
+        if (init?.signal?.aborted) {
+          const err = new Error("The operation was aborted");
+          err.name = "AbortError";
+          throw err;
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Length": "4" }),
+          arrayBuffer: async () => glbData,
+          body: null,
+        };
+      })
+    );
+
+    const controller = new AbortController();
+    const promise = strategyAssets("combo", {
+      cache: false,
+      signal: controller.signal,
+    });
+    await sleep(10);
+    controller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    // 中断は再試行しないので、各 URL の fetch は 1 回だけ
+    for (const count of assetCalls.values()) {
+      expect(count).toBe(1);
+    }
+  });
+
+  it("中断でない失敗は従来どおりリトライする", async () => {
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if ((url as string).endsWith(".json")) {
+          return { ok: true, status: 200, json: async () => sampleManifest, body: null };
+        }
+        attempts += 1;
+        if (attempts <= 2) {
+          return { ok: false, status: 500, statusText: "Internal Server Error", body: null };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Length": "4" }),
+          arrayBuffer: async () => glbData,
+          body: null,
+        };
+      })
+    );
+
+    const result = await strategyAssets("sushi", { cache: false });
+    expect(result.assets["assets/sushi.glb"]).toBeDefined();
+    expect(attempts).toBe(3);
+  });
+});
+
 describe("strategyAssets — manifest URL オプション", () => {
   it("manifestUrl オプションが fetch に渡される", async () => {
     const fetchMock = vi.fn(async (url: string) => {

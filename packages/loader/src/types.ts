@@ -106,6 +106,11 @@ export interface FetchOptions {
    * 1 を指定すると従来の逐次取得と等価になる。
    */
   concurrency?: number;
+  /**
+   * 取得を中断するためのシグナル。abort すると strategy 全体の取得が
+   * AbortError で失敗する（部分的に終わったファイルの結果は返らない）。
+   */
+  signal?: AbortSignal;
 }
 
 /** strategyAssets() が返す各ファイルのデータ */
