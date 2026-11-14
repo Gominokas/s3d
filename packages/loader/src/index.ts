@@ -68,8 +68,8 @@ export async function strategyAssets(
     signal,
   } = options;
 
-  // ── 1. manifest.json 取得
-  const manifest = await fetchManifest(manifestUrl, useCache);
+  // ── 1. manifest.json 取得（signal があれば中断も伝える）
+  const manifest = await fetchManifest(manifestUrl, useCache, false, signal);
 
   // ── 2. strategy エントリを確認
   const strategy = manifest.strategies[name];
