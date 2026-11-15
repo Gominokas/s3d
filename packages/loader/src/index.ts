@@ -11,11 +11,17 @@
  * 5. CDN URL から fetch（タイムアウト・リトライ・進捗コールバック）
  * 6. Cache API に保存
  * 7. StrategyAssetsResult を返す
+ *
+ * オプション `verifyIntegrity: true` のときは、キャッシュヒット・fetch 後の
+ * 両方で 8 文字フィンガープリントの照合を行う。キャッシュ側の不一致は
+ * evict して再取得、fetch 側の不一致は strategy 全体の失敗（再試行なし）。
+ * 破損したデータはキャッシュに入れない。
  */
 
 import { fetchManifest } from "./manifest.js";
 import { cachePut, cacheGet, cacheEvict } from "./cache.js";
 import { fetchAsset } from "./fetcher.js";
+import { verifyFingerprint, IntegrityMismatchError } from "./integrity.js";
 import type {
   FetchOptions,
   StrategyAssetsResult,
@@ -66,6 +72,7 @@ export async function strategyAssets(
     retries = DEFAULT_RETRIES,
     concurrency = DEFAULT_CONCURRENCY,
     signal,
+    verifyIntegrity = false,
   } = options;
 
   // ── 1. manifest.json 取得（signal があれば中断も伝える）
@@ -115,8 +122,27 @@ export async function strategyAssets(
     if (useCache && strategy.cache) {
       const cachedData = await cacheGet(url);
       if (cachedData !== null) {
-        data = cachedData;
-        cached = true;
+        if (verifyIntegrity) {
+          // キャッシュ側も検証する。不一致なら evict して再取得に回す
+          // （検証前に保存された古いキャッシュや、保存中の破損を拾う）。
+          // crypto.subtle が無いなどの検証自体の失敗はそのまま投げる
+          // （検証なしでキャッシュを返すことはしない）。
+          try {
+            await verifyFingerprint(cachedData, hash, fileKey);
+            data = cachedData;
+            cached = true;
+          } catch (err) {
+            if (err instanceof IntegrityMismatchError) {
+              await cacheEvict(url);
+              // data は null のまま → 下の fetch へ
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          data = cachedData;
+          cached = true;
+        }
       }
     }
 
@@ -136,6 +162,12 @@ export async function strategyAssets(
         completedFiles: completed,
         totalFiles,
       });
+
+      // 検証はキャッシュ保存の前に行う。破損したデータをキャッシュに入れない。
+      // 不一致は決定論的な失敗なので再試行しない（fetchAsset のリトライの外側）。
+      if (verifyIntegrity) {
+        await verifyFingerprint(data, hash, fileKey);
+      }
 
       // ── 6. Cache API に保存
       if (useCache && strategy.cache) {

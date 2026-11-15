@@ -111,6 +111,16 @@ export interface FetchOptions {
    * AbortError で失敗する（部分的に終わったファイルの結果は返らない）。
    */
   signal?: AbortSignal;
+  /**
+   * 完全性検証（8文字フィンガープリント）を行うか。デフォルト: false。
+   * true のとき、取得したファイルの SHA-256 の先頭 8 文字が manifest の
+   * hash と一致するか確認する。不一致なら strategy 全体が失敗する
+   * （再試行しない。破損したデータをキャッシュに入れることもない）。
+   * キャッシュヒット時も検証し、不一致なら evict して再取得する。
+   * ※ 8文字の照合は破損検出が目的で、セキュリティ保証にはならない。
+   * 完全な検証には manifest への full hash 追加が必要（#49 の射程）。
+   */
+  verifyIntegrity?: boolean;
 }
 
 /** strategyAssets() が返す各ファイルのデータ */
