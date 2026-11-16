@@ -15,6 +15,8 @@ export interface FetchAssetOptions {
   /** 進捗計算用: 全体の完了ファイル数 / 全体ファイル数 */
   completedFiles: number;
   totalFiles: number;
+  /** 呼び出し側からの中断シグナル（省略可） */
+  signal?: AbortSignal;
 }
 
 /**
@@ -36,6 +38,10 @@ export async function fetchAsset(
     try {
       return await fetchWithTimeout(url, opts);
     } catch (err) {
+      // 中断は再試行しない（AbortError はそのまま投げ直す）
+      if (err instanceof Error && err.name === "AbortError") {
+        throw err;
+      }
       lastError = err;
     }
   }
@@ -53,8 +59,16 @@ async function fetchWithTimeout(
   url: string,
   opts: FetchAssetOptions
 ): Promise<ArrayBuffer> {
+  // タイムアウトと外部シグナルを1本のコントローラに合成する。
+  // AbortSignal.any() は使わない（古いブラウザで未対応のため）。リスナー方式なら
+  // どのブラウザでも動く。既に abort 済みなら fetch 前に即座に失敗する。
+  if (opts.signal?.aborted) {
+    opts.signal.throwIfAborted();
+  }
   const controller = new AbortController();
   const timerId = setTimeout(() => controller.abort(), opts.timeout);
+  const onExternalAbort = () => controller.abort();
+  opts.signal?.addEventListener("abort", onExternalAbort, { once: true });
 
   try {
     const response = await fetch(url, { signal: controller.signal });
@@ -72,6 +86,7 @@ async function fetchWithTimeout(
     return await response.arrayBuffer();
   } finally {
     clearTimeout(timerId);
+    opts.signal?.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -87,19 +102,26 @@ async function readWithProgress(
   const chunks: Uint8Array[] = [];
   let loaded = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    chunks.push(value);
-    loaded += value.byteLength;
+      chunks.push(value);
+      loaded += value.byteLength;
 
-    opts.onProgress?.({
-      loaded,
-      total: contentLength,
-      completedFiles: opts.completedFiles,
-      totalFiles: opts.totalFiles,
-    });
+      opts.onProgress?.({
+        loaded,
+        total: contentLength,
+        completedFiles: opts.completedFiles,
+        totalFiles: opts.totalFiles,
+      });
+    }
+  } finally {
+    // 読み取り中に中断されたらストリームを解放する（でないと残る）
+    if (opts.signal?.aborted) {
+      await reader.cancel().catch(() => {});
+    }
   }
 
   // チャンクを結合して ArrayBuffer を返す

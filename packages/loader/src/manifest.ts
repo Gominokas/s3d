@@ -22,8 +22,11 @@ const MANIFEST_CACHE_NAME = "s3d-manifest-v1";
 export async function fetchManifest(
   manifestUrl: string,
   useCache: boolean,
-  forceRefresh = false
+  forceRefresh = false,
+  signal?: AbortSignal
 ): Promise<DeployManifest> {
+  signal?.throwIfAborted();
+
   if (useCache && !forceRefresh && typeof caches !== "undefined") {
     const cached = await tryGetFromCache(manifestUrl);
     if (cached !== null) {
@@ -31,8 +34,10 @@ export async function fetchManifest(
     }
   }
 
-  const manifest = await fetchManifestFromNetwork(manifestUrl);
+  const manifest = await fetchManifestFromNetwork(manifestUrl, signal);
 
+  // 中断された操作の manifest をキャッシュに入れない
+  signal?.throwIfAborted();
   if (useCache && typeof caches !== "undefined") {
     await putManifestToCache(manifestUrl, manifest);
   }
@@ -105,9 +110,13 @@ async function tryGetFromCache(
 }
 
 async function fetchManifestFromNetwork(
-  manifestUrl: string
+  manifestUrl: string,
+  signal?: AbortSignal
 ): Promise<DeployManifest> {
-  const response = await fetch(manifestUrl);
+  // シグナルが無いときは第2引数を渡さない（呼び出しの形を従来どおりに保つ）
+  const response = signal
+    ? await fetch(manifestUrl, { signal })
+    : await fetch(manifestUrl);
   if (!response.ok) {
     throw new Error(
       `manifest.json の取得に失敗しました: ${response.status} ${response.statusText} (${manifestUrl})`
