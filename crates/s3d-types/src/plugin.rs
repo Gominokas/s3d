@@ -47,6 +47,21 @@ pub trait StoragePlugin: Send + Sync {
     /// オブジェクトをアップロードする
     async fn put(&self, key: &str, data: &[u8], content_type: &str) -> StorageResult<()>;
 
+    /// Cache-Control ヘッダー付きでオブジェクトをアップロードする
+    ///
+    /// 既定実装は `cache_control` を無視して `put()` へ委譲する。
+    /// Cache-Control に対応する実装（R2Storage）はこのメソッドを上書きする。
+    async fn put_with_cache_control(
+        &self,
+        key: &str,
+        data: &[u8],
+        content_type: &str,
+        cache_control: Option<&str>,
+    ) -> StorageResult<()> {
+        let _ = cache_control;
+        self.put(key, data, content_type).await
+    }
+
     /// オブジェクトをダウンロードする
     async fn get(&self, key: &str) -> StorageResult<Vec<u8>>;
 
