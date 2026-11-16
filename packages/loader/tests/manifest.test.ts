@@ -200,6 +200,44 @@ describe("fetchManifest — Cache API 使用（バージョンポインタ方式
   });
 });
 
+describe("fetchManifest — 中断", () => {
+  it("開始前に abort すれば fetch なしで AbortError になる", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      fetchManifest("/manifest.json", false, false, controller.signal)
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("ネットワーク取得中に abort すれば AbortError になる", async () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
+        await sleep(50);
+        if (init?.signal?.aborted) {
+          const err = new Error("The operation was aborted");
+          err.name = "AbortError";
+          throw err;
+        }
+        return { ok: true, status: 200, json: async () => sampleManifest };
+      })
+    );
+
+    const controller = new AbortController();
+    const promise = fetchManifest("/manifest.json", false, false, controller.signal);
+    await sleep(10);
+    controller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
 describe("evictManifestCache", () => {
   it("Cache API が利用可能なとき manifest キャッシュを削除する", async () => {
     const cachesMock = makeCachesMock(sampleManifest);

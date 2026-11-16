@@ -11,11 +11,17 @@
  * 5. CDN URL から fetch（タイムアウト・リトライ・進捗コールバック）
  * 6. Cache API に保存
  * 7. StrategyAssetsResult を返す
+ *
+ * オプション `verifyIntegrity: true` のときは、キャッシュヒット・fetch 後の
+ * 両方で 8 文字フィンガープリントの照合を行う。キャッシュ側の不一致は
+ * evict して再取得、fetch 側の不一致は strategy 全体の失敗（再試行なし）。
+ * 破損したデータはキャッシュに入れない。
  */
 
 import { fetchManifest } from "./manifest.js";
 import { cachePut, cacheGet, cacheEvict } from "./cache.js";
 import { fetchAsset } from "./fetcher.js";
+import { verifyFingerprint, IntegrityMismatchError } from "./integrity.js";
 import type {
   FetchOptions,
   StrategyAssetsResult,
@@ -36,6 +42,8 @@ export type {
 const DEFAULT_MANIFEST_URL = "/manifest.json";
 const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_RETRIES = 2;
+const DEFAULT_CONCURRENCY = 5;
+const MAX_CONCURRENCY = 10;
 
 /**
  * 指定した strategy 名のアセットを非同期で取得する。
@@ -62,10 +70,13 @@ export async function strategyAssets(
     onComplete,
     timeout = DEFAULT_TIMEOUT,
     retries = DEFAULT_RETRIES,
+    concurrency = DEFAULT_CONCURRENCY,
+    signal,
+    verifyIntegrity = false,
   } = options;
 
-  // ── 1. manifest.json 取得
-  const manifest = await fetchManifest(manifestUrl, useCache);
+  // ── 1. manifest.json 取得（signal があれば中断も伝える）
+  const manifest = await fetchManifest(manifestUrl, useCache, false, signal);
 
   // ── 2. strategy エントリを確認
   const strategy = manifest.strategies[name];
@@ -79,10 +90,20 @@ export async function strategyAssets(
   const totalFiles = strategy.files.length;
   const resultAssets: Record<string, AssetData> = {};
 
-  // ── 3〜7. ファイルごとに取得
-  for (let i = 0; i < strategy.files.length; i++) {
-    const fileKey = strategy.files[i]!;
+  // 並列数は 1〜10 にクランプする。1 は従来の逐次取得と等価。
+  const workerCount = Math.min(
+    MAX_CONCURRENCY,
+    Math.max(1, Math.floor(concurrency) || DEFAULT_CONCURRENCY)
+  );
 
+  // ── 3〜7. ワーカープールで並列取得
+  // JS はシングルスレッドなので、共有カーソル `next` のインクリメントは
+  // await の合間にだけ起き、ワーカー同士で同じファイルを取り合うことはない。
+  // 進捗の completedFiles は「完了したファイル数」の共有カウンタ。
+  let next = 0;
+  let completed = 0;
+
+  const loadOne = async (fileKey: string): Promise<void> => {
     // manifest.assets からエントリを解決
     const entry = manifest.assets[fileKey];
     if (!entry) {
@@ -101,8 +122,27 @@ export async function strategyAssets(
     if (useCache && strategy.cache) {
       const cachedData = await cacheGet(url);
       if (cachedData !== null) {
-        data = cachedData;
-        cached = true;
+        if (verifyIntegrity) {
+          // キャッシュ側も検証する。不一致なら evict して再取得に回す
+          // （検証前に保存された古いキャッシュや、保存中の破損を拾う）。
+          // crypto.subtle が無いなどの検証自体の失敗はそのまま投げる
+          // （検証なしでキャッシュを返すことはしない）。
+          try {
+            await verifyFingerprint(cachedData, hash, fileKey);
+            data = cachedData;
+            cached = true;
+          } catch (err) {
+            if (err instanceof IntegrityMismatchError) {
+              await cacheEvict(url);
+              // data は null のまま → 下の fetch へ
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          data = cachedData;
+          cached = true;
+        }
       }
     }
 
@@ -116,10 +156,18 @@ export async function strategyAssets(
       data = await fetchAsset(url, {
         timeout,
         retries,
-        onProgress,
-        completedFiles: i,
+        // exactOptionalPropertyTypes: true のため、undefined の onProgress / signal は渡さない
+        ...(onProgress ? { onProgress } : {}),
+        ...(signal ? { signal } : {}),
+        completedFiles: completed,
         totalFiles,
       });
+
+      // 検証はキャッシュ保存の前に行う。破損したデータをキャッシュに入れない。
+      // 不一致は決定論的な失敗なので再試行しない（fetchAsset のリトライの外側）。
+      if (verifyIntegrity) {
+        await verifyFingerprint(data, hash, fileKey);
+      }
 
       // ── 6. Cache API に保存
       if (useCache && strategy.cache) {
@@ -130,13 +178,30 @@ export async function strategyAssets(
     resultAssets[fileKey] = { url, data, hash, contentType, cached };
 
     // 進捗: ファイル完了時にも報告
+    completed += 1;
     onProgress?.({
       loaded: data.byteLength,
       total: data.byteLength,
-      completedFiles: i + 1,
+      completedFiles: completed,
       totalFiles,
     });
-  }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (next < strategy.files.length) {
+      // 次のファイルを取り出す前に中断を確認する（協調的キャンセル）
+      signal?.throwIfAborted();
+      const fileKey = strategy.files[next]!;
+      next += 1;
+      await loadOne(fileKey);
+    }
+  };
+
+  // Promise.all は最初の失敗で reject するので、従来の
+  // 「1件でも失敗したら strategy 全体が失敗する」と同じ意味になる。
+  await Promise.all(
+    Array.from({ length: Math.min(workerCount, totalFiles) }, () => worker())
+  );
 
   const result: StrategyAssetsResult = {
     name,

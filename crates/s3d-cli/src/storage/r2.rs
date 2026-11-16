@@ -80,6 +80,17 @@ impl R2Storage {
 #[async_trait]
 impl StoragePlugin for R2Storage {
     async fn put(&self, key: &str, data: &[u8], content_type: &str) -> StorageResult<()> {
+        self.put_with_cache_control(key, data, content_type, None)
+            .await
+    }
+
+    async fn put_with_cache_control(
+        &self,
+        key: &str,
+        data: &[u8],
+        content_type: &str,
+        cache_control: Option<&str>,
+    ) -> StorageResult<()> {
         let url = self.url(key);
         let sign_cfg = self.sign_cfg("PUT", key, Some(content_type), data);
         let headers = sign_request(&sign_cfg).map_err(|e| StorageError {
@@ -90,6 +101,11 @@ impl StoragePlugin for R2Storage {
         let mut req = self.client.put(&url).body(data.to_vec());
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str());
+        }
+        // Cache-Control は署名対象ヘッダーではない（SigV4 は署名対象だけを検証する）。
+        // 通常の PUT ヘッダーとして送るだけで S3/R2 がオブジェクトのメタデータとして保存する。
+        if let Some(cc) = cache_control {
+            req = req.header("Cache-Control", cc);
         }
         let resp = req.send().await.map_err(|e| StorageError {
             message: format!("PUT {key} failed: {e}"),

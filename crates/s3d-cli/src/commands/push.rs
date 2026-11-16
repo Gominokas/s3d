@@ -1,5 +1,6 @@
 //! `s3d push` — アセットを R2/S3 へアップロードするコマンド
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -59,7 +60,12 @@ pub async fn run(
             match std::fs::read(&loader_path) {
                 Ok(data) => {
                     match storage
-                        .put("loader.js", &data, "application/javascript")
+                        .put_with_cache_control(
+                            "loader.js",
+                            &data,
+                            "application/javascript",
+                            Some("no-cache"),
+                        )
                         .await
                     {
                         Ok(_) => println!("  {} loader.js をアップロードしました", "↑".green()),
@@ -167,9 +173,24 @@ pub async fn run(
                             let content_type = entry
                                 .map(|e| e.content_type.as_str())
                                 .unwrap_or("application/octet-stream");
+                            // ファイル種別に応じた Cache-Control を決める（#53）。
+                            // 分類に使うのは manifest の情報だけ（key / url / strategies）。
+                            let cache_control = cache_control_for(
+                                &key,
+                                url_path.as_deref(),
+                                &new_manifest.strategies,
+                            );
                             // storage.put の第1引数はハッシュ付きキー（manifest の URL パス部分）
                             // ブラウザが要求する URL と R2 オブジェクトキーを一致させる
-                            match storage.put(&upload_key, &data, content_type).await {
+                            match storage
+                                .put_with_cache_control(
+                                    &upload_key,
+                                    &data,
+                                    content_type,
+                                    cache_control.as_deref(),
+                                )
+                                .await
+                            {
                                 Ok(_) => {
                                     let done = counter
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -203,7 +224,12 @@ pub async fn run(
     let manifest_json =
         serde_json::to_vec_pretty(&new_manifest).context("manifest JSON 変換失敗")?;
     storage
-        .put("manifest.json", &manifest_json, "application/json")
+        .put_with_cache_control(
+            "manifest.json",
+            &manifest_json,
+            "application/json",
+            Some("no-cache"),
+        )
         .await
         .map_err(|e| anyhow::anyhow!("manifest.json アップロード失敗: {}", e.message))?;
     println!("  {} manifest.json をアップロードしました", "✔".green());
@@ -230,6 +256,73 @@ async fn fetch_remote_manifest(storage: &dyn StoragePlugin, key: &str) -> Option
         Ok(data) => serde_json::from_slice(&data).ok(),
         Err(_) => None, // 初回デプロイ時は None
     }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Cache-Control 分類（#53）
+// ──────────────────────────────────────────────────────────────
+
+/// アップロードするファイルの Cache-Control ヘッダー値を決める。
+///
+/// 分類は manifest の情報だけ（論理キー / URL パス / strategies）で行う。
+///
+/// - ハッシュ付きファイル（URL のファイル名が論理キーと違う）:
+///   `public, max-age=31536000, immutable`（内容が変われば URL も変わるので長期キャッシュ可）
+/// - `initial` のファイル（strategy の initial に載っているパス）:
+///   strategy の `maxAge` 宣言があればそれを秒数に変換して使う。なければ短めの既定値。
+/// - それ以外（ハッシュなしの通常ファイル）: None（ヘッダー無し・従来どおり）
+pub fn cache_control_for(
+    key: &str,
+    url_path: Option<&str>,
+    strategies: &HashMap<String, s3d_types::manifest::StrategyEntry>,
+) -> Option<String> {
+    // initial のファイルはハッシュなしで、HTML から直接参照される。
+    // strategy の maxAge 宣言があればそれを、なければ短めの既定値を使う。
+    for entry in strategies.values() {
+        if entry.initial.as_deref() == Some(key) {
+            let max_age = entry
+                .max_age
+                .as_deref()
+                .and_then(parse_max_age)
+                .unwrap_or(3600);
+            return Some(format!("public, max-age={max_age}"));
+        }
+    }
+
+    // URL のファイル名が論理キーのファイル名と違えばハッシュ付き。
+    // 例: key "assets/sushi.glb" / url_path "assets/sushi.30e14955.glb"
+    let url_file = url_path.and_then(|p| p.rsplit('/').next());
+    let key_file = key.rsplit('/').next().unwrap_or(key);
+    if let Some(url_file) = url_file {
+        if url_file != key_file {
+            return Some("public, max-age=31536000, immutable".to_string());
+        }
+    }
+
+    None
+}
+
+/// strategy.json の `maxAge` 宣言（例: "7d" / "1h" / "30m" / "3600"）を秒数に変換する。
+///
+/// 単位: `s` 秒 / `m` 分 / `h` 時 / `d` 日。単位なしは秒として扱う。
+/// パースできない場合は None を返す。
+pub fn parse_max_age(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let (num_part, multiplier) = match value.chars().last() {
+        Some('s') => (&value[..value.len() - 1], 1),
+        Some('m') => (&value[..value.len() - 1], 60),
+        Some('h') => (&value[..value.len() - 1], 3600),
+        Some('d') => (&value[..value.len() - 1], 86400),
+        _ => (value, 1),
+    };
+    num_part
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|n| n.saturating_mul(multiplier))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -729,5 +822,92 @@ mod tests {
             "https://cdn.example.com/assets/cake-3d.30e14955.bin",
             "manifest の URL が CDN 絶対 URL + ハッシュ付きであるべき"
         );
+    }
+
+    // ── Cache-Control 分類テスト（#53） ─────────────────────────────
+
+    fn strategy_with_initial(initial: &str, max_age: Option<&str>) -> s3d_types::manifest::StrategyEntry {
+        s3d_types::manifest::StrategyEntry {
+            files: vec![],
+            initial: Some(initial.to_string()),
+            cache: true,
+            max_age: max_age.map(|s| s.to_string()),
+            reload: None,
+        }
+    }
+
+    #[test]
+    fn test_cache_control_for_hashed_file() {
+        let strategies = HashMap::new();
+        let cc = cache_control_for(
+            "assets/sushi.glb",
+            Some("assets/sushi.30e14955.glb"),
+            &strategies,
+        );
+        assert_eq!(
+            cc.as_deref(),
+            Some("public, max-age=31536000, immutable"),
+            "ハッシュ付きファイルは長期キャッシュ + immutable であるべき"
+        );
+    }
+
+    #[test]
+    fn test_cache_control_for_unhashed_file() {
+        let strategies = HashMap::new();
+        let cc = cache_control_for(
+            "assets/style.css",
+            Some("assets/style.css"),
+            &strategies,
+        );
+        assert_eq!(cc, None, "ハッシュなしの通常ファイルはヘッダー無し（従来どおり）");
+    }
+
+    #[test]
+    fn test_cache_control_for_initial_with_max_age() {
+        let mut strategies = HashMap::new();
+        strategies.insert(
+            "sushi".to_string(),
+            strategy_with_initial("assets/placeholder.png", Some("7d")),
+        );
+        let cc = cache_control_for(
+            "assets/placeholder.png",
+            Some("assets/placeholder.png"),
+            &strategies,
+        );
+        assert_eq!(
+            cc.as_deref(),
+            Some("public, max-age=604800"),
+            "initial は strategy の maxAge（7d = 604800秒）を使うべき"
+        );
+    }
+
+    #[test]
+    fn test_cache_control_for_initial_without_max_age() {
+        let mut strategies = HashMap::new();
+        strategies.insert(
+            "sushi".to_string(),
+            strategy_with_initial("assets/placeholder.png", None),
+        );
+        let cc = cache_control_for(
+            "assets/placeholder.png",
+            Some("assets/placeholder.png"),
+            &strategies,
+        );
+        assert_eq!(
+            cc.as_deref(),
+            Some("public, max-age=3600"),
+            "initial は maxAge 宣言がなければ短めの既定値（3600秒）を使うべき"
+        );
+    }
+
+    #[test]
+    fn test_parse_max_age() {
+        assert_eq!(parse_max_age("7d"), Some(604800));
+        assert_eq!(parse_max_age("1h"), Some(3600));
+        assert_eq!(parse_max_age("30m"), Some(1800));
+        assert_eq!(parse_max_age("3600"), Some(3600));
+        assert_eq!(parse_max_age("90s"), Some(90));
+        assert_eq!(parse_max_age("abc"), None);
+        assert_eq!(parse_max_age(""), None);
     }
 }
