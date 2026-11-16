@@ -1,5 +1,5 @@
 /**
- * 完全性検証モジュール（下書き 9 の残り）
+ * 完全性検証モジュール（#54）
  *
  * manifest.json の `hash` は SHA-256 hex の先頭 8 文字だけ
  * （`crates/s3d-deploy/src/hash.rs`、`DEFAULT_HASH_LENGTH = 8`）。
@@ -9,7 +9,7 @@
  * - 8 文字（32 bit）の照合は衝突確率 2^-32 で、セキュリティ保証にはならない。
  *   ハッシュは署名でもない（manifest とファイルが同じ経路で改ざんされれば通る）。
  * - 完全な検証（64 文字の full hash 照合）には manifest への full hash 追加が
- *   必要で、#49 の射程（ダーリンの判断待ち）。その判断が出るまでの暫定版。
+ *   必要で、#49 の範囲。その対応までの暫定版。
  *
  * 検証は `crypto.subtle.digest("SHA-256", ...)` で行う。HTTPS など
  * secure context が前提。`crypto.subtle` が無い環境では検証を要求した

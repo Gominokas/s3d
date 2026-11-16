@@ -173,7 +173,7 @@ pub async fn run(
                             let content_type = entry
                                 .map(|e| e.content_type.as_str())
                                 .unwrap_or("application/octet-stream");
-                            // ファイル種別に応じた Cache-Control を決める（下書き 7）。
+                            // ファイル種別に応じた Cache-Control を決める（#53）。
                             // 分類に使うのは manifest の情報だけ（key / url / strategies）。
                             let cache_control = cache_control_for(
                                 &key,
@@ -259,7 +259,7 @@ async fn fetch_remote_manifest(storage: &dyn StoragePlugin, key: &str) -> Option
 }
 
 // ──────────────────────────────────────────────────────────────
-// Cache-Control 分類（下書き 7）
+// Cache-Control 分類（#53）
 // ──────────────────────────────────────────────────────────────
 
 /// アップロードするファイルの Cache-Control ヘッダー値を決める。
@@ -824,7 +824,7 @@ mod tests {
         );
     }
 
-    // ── Cache-Control 分類テスト（下書き 7） ─────────────────────────────
+    // ── Cache-Control 分類テスト（#53） ─────────────────────────────
 
     fn strategy_with_initial(initial: &str, max_age: Option<&str>) -> s3d_types::manifest::StrategyEntry {
         s3d_types::manifest::StrategyEntry {
